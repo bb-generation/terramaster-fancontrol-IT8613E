@@ -1,9 +1,17 @@
 [Unit]
-Description=Fancontrol
+Description=TerraMaster Fan Control Service
+After=local-fs.target
 
 [Service]
-ExecStart=/mnt/ssd/storage/terramaster-fancontrol/fancontrol --drive_list="sda,sdb,sdc,sdd" --setpoint=37 --debug=1 --kp=50.0 --ki=0.5 --kd=0 --imax=300 --graphite_server=10.25.9.5:2003
+Type=simple
+# Option 1: Use config file (recommended)
+ExecStart=/usr/local/bin/fancontrol --config=/etc/fancontrol.conf
+# Option 2: Use command line arguments with auto-detection
+# ExecStart=/usr/local/bin/fancontrol --auto_detect --setpoint=37 --debug=0
+# Option 3: Manually specify drives
+# ExecStart=/usr/local/bin/fancontrol --drive_list="sda,sdb,sdc,sdd,nvme0n1" --setpoint=37 --debug=0
 Restart=on-failure
+RestartSec=10
 
 [Install]
 WantedBy=multi-user.target

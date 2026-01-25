@@ -7,17 +7,31 @@ Original author: https://xpenology.com/forum/topic/14007-terramaster-f4-220-fan-
 This fork implements changes for it to work with NAS devices containing the IT8613E chipset, while the original program only supported IT8772E (used in the F4-220).
 Initially I made the changes described in [this post](https://xpenology.com/forum/topic/14007-terramaster-f4-220-fan-control/?do=findComment&comment=264172), but in the end I just commented out the part that was specific for the IT8772E.
 
-Further improvements are:
-1. It no longer uses the creation of files in ``/opt/disks``, named after the disks you want to monitor.
-Instead, you give it a list of drive names as an argument.
-2. I have also added reporting to a Graphite server.
-Enable it by adding ``--graphite_server=<ip address>:<port>``.
-This allows you to monitor the fan speed in Grafana:
+## Features
+
+1. **Configuration file support** - All settings can be configured via `/etc/fancontrol.conf`
+2. **Auto-detection of drives** - Automatically detects HDDs, SSDs, and NVMe drives
+3. **NVMe support** - Full support for NVMe drive temperature monitoring
+4. **Graphite integration** - Optional reporting to a Graphite server for monitoring in Grafana
+5. **Simple fan curve** - Easy-to-understand linear fan speed control based on temperature thresholds
+
 <img width="883" alt="image" src="https://github.com/Nikotine1/terramaster-fancontrol-IT8613E/assets/1538384/a89e8c9d-1ada-490a-b380-9101bc4fa552">
-3. New PID controller for the fan speed.
 
 ## Installation:
 Warning: As from Truenas 24.10.1, [the home folder is no longer executable](https://forums.truenas.com/t/shell-script-permission-denied-with-24-10-1/27941). Instead, use the data pool for your scripts.
+
+### Prerequisites
+
+Install required tools:
+```bash
+# For SATA/SAS drive temperature monitoring
+apt install smartmontools lm-sensors
+
+# For NVMe drive temperature monitoring (optional but recommended)
+apt install nvme-cli
+```
+
+### Build
 
 1. Clone the repo
    ```
@@ -34,39 +48,166 @@ Warning: As from Truenas 24.10.1, [the home folder is no longer executable](http
      sudo docker run --rm -v "$PWD":/usr/src/myapp -w /usr/src/myapp gcc gcc -o fancontrol fancontrol.cpp
      ```
 
-3. Run the compiled program.
-   ```
-   sudo ./fancontrol --drive_list="sda,sdb,sdc,sdd" --debug=1 --setpoint=37
-   ```
-   This will run it in debug mode (1), monitoring drives /dev/sda to d, with temperature setpoint 37°C. Make sure to run with sudo.
+### Quick Start (Auto-detection)
 
-4. Alternatively, you can use the included systemd service.
-   - Change the location of the fancontrol application.
-   - Make sure you also add the list of drives there.
-   - Copy it to `/etc/systemd/system`:
-     ```
-     sudo systemctl start fancontrol.service
-     sudo systemctl enable fancontrol.service
-     ```
-   - You will have to reinstall the service after every Truenas update. I use a shell script to do this(install_service.sh).
+The easiest way to run fancontrol is with automatic drive detection:
+```bash
+sudo ./fancontrol --auto_detect --debug=1
+```
+
+This will automatically detect all HDDs, SSDs, and NVMe drives in your system.
+
+### Configuration File
+
+1. Generate a sample configuration file:
+   ```bash
+   sudo ./fancontrol --generate-config
+   ```
+   This creates `/etc/fancontrol.conf` with default settings.
+
+2. Edit the configuration file to your needs:
+   ```bash
+   sudo nano /etc/fancontrol.conf
+   ```
+
+3. Run with config file:
+   ```bash
+   sudo ./fancontrol --config=/etc/fancontrol.conf
+   ```
+
+### Manual Drive Specification
+
+If you prefer to manually specify drives:
+```bash
+sudo ./fancontrol --drive_list="sda,sdb,sdc,sdd,nvme0n1" --debug=1
+```
+
+### Systemd Service Installation
+
+1. Copy the binary and config:
+   ```bash
+   sudo cp fancontrol /usr/local/bin/
+   sudo cp fancontrol.conf /etc/
+   ```
+
+2. Copy and enable the service:
+   ```bash
+   sudo cp fancontrol.service /etc/systemd/system/
+   sudo systemctl daemon-reload
+   sudo systemctl start fancontrol.service
+   sudo systemctl enable fancontrol.service
+   ```
+
+3. Check status:
+   ```bash
+   sudo systemctl status fancontrol.service
+   ```
+
+Note: You may need to reinstall the service after Truenas updates. Use `install_service.sh` for convenience.
 
 ## Parameters:
 ```
- fancontrol --drive_list=<drive_list> [--debug=<value>] [--setpoint=<value>] [--pwminit=<value>] [--interval=<value>] [--overheat=<value>] [--pwmmin=<value>] [--kp=<value>] [--ki=<value>] [--imax=<value>] [--kd=<value>] [--cpu_avg=<value>] [--graphite_server=<ip:port>]
+Usage:
 
-drive_list        A comma-separated list of drive names between quotes e.g. 'sda,sdc' (required)
-debug             Enable (1) or disable (0) debug logs (default: 0)
-setpoint          Target maximum hard drive operating temperature in
-                  degrees Celsius (default: 37)
-pwminit           Initial PWM value to write (default: 128)
-interval          How often we poll for temperatures in seconds (default: 10)
-overheat          Overheat temperature threshold in degrees Celsius above
-                  which we drive the fans at maximum speed (default: 45)
-pwmmin            Never drive the fans below this PWM value (default: 80)
-kp                Proportional coefficient (default: 50.0)
-ki                Integral coefficient (default: 0.5)
-imax              Maximum integral value (default: 255.0)
-kd                Derivative coefficient (default: 0.0)
-cpu_avg           Number of CPU temperature measurements for rolling average (default: 10)
-graphite_server   Graphite server IP address and port in the format <ip:port> (optional)
+ fancontrol [--config=<path>] [--auto_detect] [options]
+
+Configuration:
+  --config=<path>       Path to config file (default: /etc/fancontrol.conf)
+  --generate-config     Generate a sample config file and exit
+
+Drive Options:
+  --drive_list=<list>   Comma-separated list of drive names e.g. 'sda,nvme0n1'
+  --auto_detect         Auto-detect drives (default)
+  --no_nvme             Exclude NVMe drives from auto-detection
+  --no_hdd              Exclude HDD/SSD drives from auto-detection
+
+Fan Curve:
+  --temp_low=<value>    Temperature for minimum fan speed (default: 35°C)
+  --temp_high=<value>   Temperature for maximum fan speed (default: 50°C)
+  --fan_min=<value>     Minimum PWM, fans never go below (default: 80 ~30%)
+  --fan_start=<value>   Fan PWM at temp_low (default: 100 ~40%)
+  --fan_max=<value>     Maximum PWM at temp_high (default: 255 100%)
+
+Other:
+  --debug=<0|1>         Enable debug logging (default: 0)
+  --interval=<value>    Polling interval in seconds (default: 10)
+  --cpu_temp_offset=<value>  CPU temp offset vs drives (default: 20°C)
+  --graphite_server=<ip:port>  Graphite server for metrics
 ```
+
+Config file settings are overridden by command line arguments.
+
+## Fan Curve
+
+The fan speed is controlled using a simple linear interpolation between temperature thresholds:
+
+```
+Fan Speed
+   ^
+100%|                     ________
+    |                    /
+    |                   /
+ 40%|__________________/
+    |       ^         ^
+ 30%|-------|---------|----------
+    +-------+---------+--------> Temperature
+          35°C      50°C
+       (temp_low) (temp_high)
+```
+
+- **Below temp_low (35°C)**: Fans run at `fan_min` (~30%) - quiet operation
+- **At temp_low (35°C)**: Fans run at `fan_start` (~40%)
+- **Between temp_low and temp_high**: Linear interpolation
+- **At temp_high (50°C) and above**: Fans run at `fan_max` (100%)
+
+Example with default settings:
+| Temperature | Fan Speed |
+|-------------|-----------|
+| 30°C        | 31%       |
+| 35°C        | 39%       |
+| 42°C        | 70%       |
+| 50°C+       | 100%      |
+
+## Configuration File Format
+
+The configuration file uses INI-style format with sections:
+
+```ini
+[general]
+debug = false
+interval = 10
+
+[drives]
+auto_detect = true
+include_nvme = true
+include_hdd = true
+# drive_list = sda,sdb,sdc,sdd,nvme0n1
+
+[fan_curve]
+# Temperature thresholds (Celsius)
+temp_low = 35
+temp_high = 50
+
+# Fan speed limits (PWM: 0-255)
+fan_min = 80      # ~31% - minimum speed
+fan_start = 100   # ~39% - speed at temp_low
+fan_max = 255     # 100% - speed at temp_high
+
+[cpu]
+cpu_temp_offset = 20
+cpu_avg_samples = 10
+
+[graphite]
+# graphite_server = 192.168.1.100:2003
+```
+
+## Drive Auto-Detection
+
+The program automatically detects drives by scanning `/sys/block/`. It identifies:
+- **HDDs** - Rotational drives (detected via `/sys/block/<dev>/queue/rotational`)
+- **SSDs** - Non-rotational SATA drives
+- **NVMe** - NVMe drives (detected by device name starting with `nvme`)
+
+Temperature is read using:
+- `smartctl` for SATA/SAS drives
+- `nvme smart-log` or hwmon for NVMe drives

@@ -15,4 +15,4 @@ WORKDIR /home/developer
 COPY . /home/developer
 
 # Optional: Compile within the container
-#RUN gcc -o fancontrol fancontrol.cpp
+#RUN g++ -o fancontrol fancontrol.cpp
