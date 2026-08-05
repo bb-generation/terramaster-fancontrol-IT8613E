@@ -91,6 +91,13 @@ sudo ./fancontrol --drive_list="sda,sdb,sdc,sdd,nvme0n1" --debug=1
 
 ### Systemd Service Installation
 
+Easiest: build + install + start in one go (wraps `install_service.sh`):
+```bash
+sudo make install
+```
+
+Or manually:
+
 1. Copy the binary and config:
    ```bash
    sudo cp fancontrol /usr/local/bin/

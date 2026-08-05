@@ -7,9 +7,13 @@ fancontrol: fancontrol.cpp
 tests: tests.cpp fancontrol.cpp
 	$(CXX) $(CXXFLAGS) -o $@ tests.cpp
 
-.PHONY: test clean
+.PHONY: test install clean
 test: tests
 	./tests
+
+# Installs binary, config, and systemd service. Needs root: sudo make install
+install: fancontrol
+	./install_service.sh
 
 clean:
 	rm -f fancontrol tests
