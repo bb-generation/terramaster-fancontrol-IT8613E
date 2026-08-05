@@ -32,9 +32,18 @@ apt install smartmontools lm-sensors
 apt install nvme-cli
 ```
 
-### Build
+### Install from Release (no toolchain needed)
 
-Alternatively, skip building and grab the `fancontrol` binary from the [Releases page](https://github.com/schudt/terramaster-fancontrol-IT8613E/releases).
+Each [release](https://github.com/schudt/terramaster-fancontrol-IT8613E/releases) ships `fancontrol-linux-x86_64.tar.gz` containing the static binary, sample config, systemd unit, and installer. On the NAS:
+
+```bash
+curl -sL https://github.com/schudt/terramaster-fancontrol-IT8613E/releases/latest/download/fancontrol-linux-x86_64.tar.gz | tar xz
+sudo ./install_service.sh
+```
+
+The binary is fully static — runs on any x86_64 Linux, no library requirements.
+
+### Build from Source
 
 1. Clone the repo
    ```

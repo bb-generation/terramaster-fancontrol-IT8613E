@@ -29,6 +29,9 @@ jobs:
             echo "ERROR: binary is dynamically linked"; exit 1
           fi
 
+      - name: Package release tarball
+        run: tar czf fancontrol-linux-x86_64.tar.gz fancontrol fancontrol.conf fancontrol.service install_service.sh
+
       - name: Generate Changelog
         id: changelog
         run: |
@@ -51,4 +54,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           body: ${{ steps.changelog.outputs.changelog }}
-          files: fancontrol
+          files: |
+            fancontrol
+            fancontrol-linux-x86_64.tar.gz
