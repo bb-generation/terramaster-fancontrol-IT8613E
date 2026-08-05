@@ -59,8 +59,8 @@ static bool debug = false; // Turn on/off logging
 static int interval = 10;  // How often we poll for temperatures
 
 // Fan curve temperatures (in Celsius)
-static int temp_low = 35;      // Below this: fans at minimum speed
-static int temp_high = 50;     // Above this: fans at maximum speed
+static int temp_low = 40;      // Below this: fans at minimum speed
+static int temp_high = 60;     // Above this: fans at maximum speed
 // Between temp_low and temp_high: linear interpolation
 
 // Fan speed limits (PWM 0-255)
@@ -77,6 +77,7 @@ static bool include_nvme = true; // Include NVMe drives in auto-detection
 static bool include_hdd = true;  // Include HDD/SSD drives in auto-detection
 static int cpu_temp_offset = 20; // CPU temperature offset compared to drives
 static bool respect_standby = true; // Don't wake sleeping drives for temperature check
+static bool monitor_only = false; // Monitor mode: only output temps, don't control fans
 
 // Drive structure to hold drive info
 struct DriveInfo {
@@ -341,8 +342,8 @@ void print_usage() {
            "  --no_hdd              Exclude HDD/SSD drives from auto-detection\n"
            "\n"
            "Fan Curve (simple, recommended):\n"
-           "  --temp_low=<value>    Temperature for minimum fan speed (default: 35°C)\n"
-           "  --temp_high=<value>   Temperature for maximum fan speed (default: 50°C)\n"
+           "  --temp_low=<value>    Temperature for minimum fan speed (default: 40°C)\n"
+           "  --temp_high=<value>   Temperature for maximum fan speed (default: 60°C)\n"
            "  --fan_min=<value>     Minimum PWM, fans never go below (default: 80 ~30%%)\n"
            "  --fan_start=<value>   Fan PWM at temp_low (default: 100 ~40%%)\n"
            "  --fan_max=<value>     Maximum PWM at temp_high (default: 255 100%%)\n"
@@ -352,12 +353,13 @@ void print_usage() {
            "  --interval=<value>    Polling interval in seconds (default: 10)\n"
            "  --cpu_temp_offset=<value>  CPU temp offset vs drives (default: 20°C)\n"
            "  --graphite_server=<ip:port>  Graphite server for metrics\n"
+           "  --monitor-only        Only display temps and fan speed, don't control fans\n"
            "\n"
            "Fan curve example (with defaults):\n"
-           "  Below 35°C  -> 30%% (quiet)\n"
-           "  At 35°C     -> 40%% (fan_start)\n"
-           "  At 42°C     -> 70%% (interpolated)\n"
-           "  At 50°C+    -> 100%% (full speed)\n"
+           "  Below 40°C  -> 30%% (quiet)\n"
+           "  At 40°C     -> 40%% (fan_start)\n"
+           "  At 50°C     -> 70%% (interpolated)\n"
+           "  At 60°C+    -> 100%% (full speed)\n"
            "\n"
            "Config file settings are overridden by command line arguments.\n");
 }
@@ -405,16 +407,16 @@ void generate_sample_config(const char *path) {
     fprintf(f, "#   - At temp_high:    fans run at fan_max (full speed)\n");
     fprintf(f, "#   - Between:         linear interpolation\n");
     fprintf(f, "#\n");
-    fprintf(f, "# Example with defaults (temp_low=35, temp_high=50):\n");
-    fprintf(f, "#   30°C -> 30%% (fan_min)\n");
-    fprintf(f, "#   35°C -> 40%% (fan_start)\n");
-    fprintf(f, "#   42°C -> 70%%\n");
-    fprintf(f, "#   50°C -> 100%% (fan_max)\n");
+    fprintf(f, "# Example with defaults (temp_low=40, temp_high=60):\n");
+    fprintf(f, "#   35°C -> 30%% (fan_min)\n");
+    fprintf(f, "#   40°C -> 40%% (fan_start)\n");
+    fprintf(f, "#   50°C -> 70%%\n");
+    fprintf(f, "#   60°C -> 100%% (fan_max)\n");
     fprintf(f, "#\n");
     fprintf(f, "\n");
     fprintf(f, "# Temperature thresholds (Celsius)\n");
-    fprintf(f, "temp_low = 35\n");
-    fprintf(f, "temp_high = 50\n");
+    fprintf(f, "temp_low = 40\n");
+    fprintf(f, "temp_high = 60\n");
     fprintf(f, "\n");
     fprintf(f, "# Fan speed limits (PWM: 0-255)\n");
     fprintf(f, "# fan_min: absolute minimum, fans never go below this (~30%%)\n");
@@ -837,6 +839,8 @@ int main(int argc, char *argv[])
                 printf("Invalid Graphite server format. Expected <ip:port>\n");
                 return 1;
             }
+        } else if (strcmp(argv[i], "--monitor-only") == 0) {
+            monitor_only = true;
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             print_usage();
             return 0;
@@ -908,44 +912,49 @@ int main(int argc, char *argv[])
         printf("\n");
     }
 
-    // Obtain access to IO ports
-    if (iopl(3) != 0) {
-        printf("Error: Failed to get IO port access. Are you running as root?\n");
-        return 1;
-    }
-
-    // Initialize the IT8613E
-    outb(0x87, port);
-    outb(0x01, port);
-    outb(0x55, port);
-    outb(0x55, port);
-
-    // Sanity checks commented out so that it works for both chips.
-    // Sanity check that this is the IT8772E
-    //assert(ioread(0x20) == 0x87);
-    //assert(ioread(0x21) == 0x72);
-
-    // Sanity check that this is the IT8613E
-    //assert(ioread(0x20) == 0x86);
-    //assert(ioread(0x21) == 0x13);
-
-    // Set LDN = 4 to access environment registers
-    iowrite(0x07, 0x04);
-
-    // Activate environment controller (EC)
-    iowrite(0x30, 0x01);
-
-    // Read EC bar
-    ecbar = (ioread(0x60) << 8) + ioread(0x61);
-
-    // Initialize the PWM value
     uint8_t pwm = fan_min;
-    ecwrite(0x6b, pwm);
-    ecwrite(0x73, pwm);
 
-    // Set software operation
-    ecwrite(0x16, 0x00);
-    ecwrite(0x17, 0x00);
+    if (monitor_only) {
+        printf("Monitor mode: temperatures and computed fan speed only, hardware untouched.\n");
+    } else {
+        // Obtain access to IO ports
+        if (iopl(3) != 0) {
+            printf("Error: Failed to get IO port access. Are you running as root?\n");
+            return 1;
+        }
+
+        // Initialize the IT8613E
+        outb(0x87, port);
+        outb(0x01, port);
+        outb(0x55, port);
+        outb(0x55, port);
+
+        // Sanity checks commented out so that it works for both chips.
+        // Sanity check that this is the IT8772E
+        //assert(ioread(0x20) == 0x87);
+        //assert(ioread(0x21) == 0x72);
+
+        // Sanity check that this is the IT8613E
+        //assert(ioread(0x20) == 0x86);
+        //assert(ioread(0x21) == 0x13);
+
+        // Set LDN = 4 to access environment registers
+        iowrite(0x07, 0x04);
+
+        // Activate environment controller (EC)
+        iowrite(0x30, 0x01);
+
+        // Read EC bar
+        ecbar = (ioread(0x60) << 8) + ioread(0x61);
+
+        // Initialize the PWM value
+        ecwrite(0x6b, pwm);
+        ecwrite(0x73, pwm);
+
+        // Set software operation
+        ecwrite(0x16, 0x00);
+        ecwrite(0x17, 0x00);
+    }
 
     int maxtemp = 0;
 
@@ -963,6 +972,11 @@ int main(int argc, char *argv[])
     while (true)
     {
         maxtemp = 0;
+
+        // Print separator in monitor/debug mode
+        if (debug || monitor_only) {
+            printf("----------------------------------------\n");
+        }
 
         // (Re)connect Graphite if configured and not connected
         if (!graphite_server.empty() && graphite_sockfd < 0) {
@@ -983,7 +997,7 @@ int main(int argc, char *argv[])
 
             if (temp > maxtemp) maxtemp = temp;
 
-            if (debug) printf("Drive: /dev/%s (%s) temperature: %d°C\n",
+            if (debug || monitor_only) printf("Drive: /dev/%s (%s) temperature: %d°C\n",
                             drives[i].c_str(),
                             is_nvme_drive ? "NVMe" : "SATA",
                             temp);
@@ -1035,11 +1049,11 @@ int main(int argc, char *argv[])
                 maxtemp = cpu_avg_temp - cpu_temp_offset;
             }
 
-            if (debug) printf("CPU Temperature: %d°C | Rolling Avg (last %d): %d°C\n", 
+            if (debug || monitor_only) printf("CPU Temperature: %d°C | Rolling Avg (last %d): %d°C\n",
                             cputemp, cputemp_count, cpu_avg_temp);
         }
 
-        if (debug) printf("Max Temperature: %d°C\n", maxtemp);
+        if (debug || monitor_only) printf("Max Temperature: %d°C\n", maxtemp);
 
         if (graphite_sockfd >= 0) {
             char message[256];
@@ -1050,15 +1064,17 @@ int main(int argc, char *argv[])
 
         // Calculate fan speed based on temperature
         pwm = calculate_fan_speed(maxtemp);
-        
-        if (debug) {
-            printf("Fan curve: temp=%d°C -> pwm=%d (%.0f%%)\n",
+
+        if (debug || monitor_only) {
+            printf("Fan speed: temp=%d°C -> pwm=%d (%.0f%%)\n",
                    maxtemp, pwm, (pwm / 255.0) * 100);
         }
 
-        // Write new PWM
-        ecwrite(0x6b, pwm);
-        ecwrite(0x73, pwm);
+        // Write new PWM (skip in monitor-only mode)
+        if (!monitor_only) {
+            ecwrite(0x6b, pwm);
+            ecwrite(0x73, pwm);
+        }
 
         // Send PWM value to Graphite if configured
         if (graphite_sockfd >= 0) {

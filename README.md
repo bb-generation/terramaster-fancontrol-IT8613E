@@ -59,6 +59,11 @@ sudo ./fancontrol --auto_detect --debug=1
 
 This will automatically detect all HDDs, SSDs, and NVMe drives in your system.
 
+To watch temperatures and the computed fan speed without touching the fans:
+```bash
+sudo ./fancontrol --monitor-only
+```
+
 ### Configuration File
 
 1. Generate a sample configuration file:
@@ -124,8 +129,8 @@ Drive Options:
   --no_hdd              Exclude HDD/SSD drives from auto-detection
 
 Fan Curve:
-  --temp_low=<value>    Temperature for minimum fan speed (default: 35°C)
-  --temp_high=<value>   Temperature for maximum fan speed (default: 50°C)
+  --temp_low=<value>    Temperature for minimum fan speed (default: 40°C)
+  --temp_high=<value>   Temperature for maximum fan speed (default: 60°C)
   --fan_min=<value>     Minimum PWM, fans never go below (default: 80 ~30%)
   --fan_start=<value>   Fan PWM at temp_low (default: 100 ~40%)
   --fan_max=<value>     Maximum PWM at temp_high (default: 255 100%)
@@ -135,6 +140,7 @@ Other:
   --interval=<value>    Polling interval in seconds (default: 10)
   --cpu_temp_offset=<value>  CPU temp offset vs drives (default: 20°C)
   --graphite_server=<ip:port>  Graphite server for metrics
+  --monitor-only        Only display temps and fan speed, don't control fans
 ```
 
 Config file settings are overridden by command line arguments.
@@ -153,22 +159,22 @@ Fan Speed
     |       ^         ^
  30%|-------|---------|----------
     +-------+---------+--------> Temperature
-          35°C      50°C
+          40°C      60°C
        (temp_low) (temp_high)
 ```
 
-- **Below temp_low (35°C)**: Fans run at `fan_min` (~30%) - quiet operation
-- **At temp_low (35°C)**: Fans run at `fan_start` (~40%)
+- **Below temp_low (40°C)**: Fans run at `fan_min` (~30%) - quiet operation
+- **At temp_low (40°C)**: Fans run at `fan_start` (~40%)
 - **Between temp_low and temp_high**: Linear interpolation
-- **At temp_high (50°C) and above**: Fans run at `fan_max` (100%)
+- **At temp_high (60°C) and above**: Fans run at `fan_max` (100%)
 
 Example with default settings:
 | Temperature | Fan Speed |
 |-------------|-----------|
-| 30°C        | 31%       |
-| 35°C        | 39%       |
-| 42°C        | 70%       |
-| 50°C+       | 100%      |
+| 35°C        | 31%       |
+| 40°C        | 39%       |
+| 50°C        | 70%       |
+| 60°C+       | 100%      |
 
 ## Configuration File Format
 
@@ -187,8 +193,8 @@ include_hdd = true
 
 [fan_curve]
 # Temperature thresholds (Celsius)
-temp_low = 35
-temp_high = 50
+temp_low = 40
+temp_high = 60
 
 # Fan speed limits (PWM: 0-255)
 fan_min = 80      # ~31% - minimum speed
