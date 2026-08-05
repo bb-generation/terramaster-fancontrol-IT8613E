@@ -7,11 +7,16 @@ Type=simple
 # Option 1: Use config file (recommended)
 ExecStart=/usr/local/bin/fancontrol --config=/etc/fancontrol.conf
 # Option 2: Use command line arguments with auto-detection
-# ExecStart=/usr/local/bin/fancontrol --auto_detect --setpoint=37 --debug=0
+# ExecStart=/usr/local/bin/fancontrol --auto_detect --temp_low=35 --temp_high=50 --debug=0
 # Option 3: Manually specify drives
-# ExecStart=/usr/local/bin/fancontrol --drive_list="sda,sdb,sdc,sdd,nvme0n1" --setpoint=37 --debug=0
+# ExecStart=/usr/local/bin/fancontrol --drive_list="sda,sdb,sdc,sdd,nvme0n1" --temp_low=35 --temp_high=50 --debug=0
 Restart=on-failure
 RestartSec=10
+
+# Hardening (root is still required for raw IO port access via iopl)
+NoNewPrivileges=yes
+ProtectHome=yes
+PrivateTmp=yes
 
 [Install]
 WantedBy=multi-user.target

@@ -22,11 +22,19 @@ CONFIG_DEST="/etc/fancontrol.conf"
 if [[ ! -f "$BINARY_SOURCE" ]]; then
     echo "Error: fancontrol binary not found at $BINARY_SOURCE"
     echo "Please compile the program first:"
-    echo "  docker run --rm -v \"\$PWD\":/usr/src/myapp -w /usr/src/myapp gcc gcc -o fancontrol fancontrol.cpp"
+    echo "  make"
+    echo "or via Docker:"
+    echo "  docker run --rm -v \"\$PWD\":/usr/src/myapp -w /usr/src/myapp gcc g++ -O2 -Wall -o fancontrol fancontrol.cpp"
     exit 1
 fi
 
-# Step 1: Copy the binary
+# Step 1: Stop the service before replacing the binary
+# (copying over a running executable fails with "Text file busy")
+echo "Stopping fancontrol.service..."
+systemctl stop fancontrol.service 2>/dev/null || true
+echo "Service stopped (or was not running)."
+
+# Step 2: Copy the binary
 echo "Installing fancontrol binary to $BINARY_DEST..."
 if cp "$BINARY_SOURCE" "$BINARY_DEST" && chmod +x "$BINARY_DEST"; then
     echo "Successfully installed fancontrol binary."
@@ -35,7 +43,7 @@ else
     exit 1
 fi
 
-# Step 2: Install config file (don't overwrite existing)
+# Step 3: Install config file (don't overwrite existing)
 if [[ -f "$CONFIG_DEST" ]]; then
     echo "Configuration file already exists at $CONFIG_DEST, keeping existing config."
     echo "New sample config saved to ${CONFIG_DEST}.new"
@@ -51,7 +59,7 @@ else
     fi
 fi
 
-# Step 3: Copy the service file
+# Step 4: Copy the service file
 echo "Installing service file to $SERVICE_DEST..."
 if cp "$SERVICE_SOURCE" "$SERVICE_DEST"; then
     echo "Successfully installed service file."
@@ -60,7 +68,7 @@ else
     exit 1
 fi
 
-# Step 4: Daemon reload
+# Step 5: Daemon reload
 echo "Reloading systemd daemon..."
 if systemctl daemon-reload; then
     echo "Daemon reloaded."
@@ -68,11 +76,6 @@ else
     echo "Failed to reload daemon. Exiting."
     exit 1
 fi
-
-# Step 5: Stop the service (ignore errors if not running)
-echo "Stopping fancontrol.service..."
-systemctl stop fancontrol.service 2>/dev/null || true
-echo "Service stopped (or was not running)."
 
 # Step 6: Start the service
 echo "Starting fancontrol.service..."

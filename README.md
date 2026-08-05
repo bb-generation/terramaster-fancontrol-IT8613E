@@ -38,15 +38,17 @@ apt install nvme-cli
    git clone https://github.com/Nikotine1/terramaster-fancontrol-IT8613E
    ```
 
-2. Build with GCC.
-   - Pull the image:
+2. Build.
+   - Directly (needs g++):
+     ```
+     make
+     ```
+   - Or with the GCC Docker image (no local toolchain needed):
      ```
      docker pull gcc
+     sudo docker run --rm -v "$PWD":/usr/src/myapp -w /usr/src/myapp gcc g++ -O2 -Wall -o fancontrol fancontrol.cpp
      ```
-   - Compile fancontrol.cpp:
-     ```
-     sudo docker run --rm -v "$PWD":/usr/src/myapp -w /usr/src/myapp gcc gcc -o fancontrol fancontrol.cpp
-     ```
+     Note: use `g++` (not `gcc`) — the source is C++ and needs libstdc++ linked.
 
 ### Quick Start (Auto-detection)
 

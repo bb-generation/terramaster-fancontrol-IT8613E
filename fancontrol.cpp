@@ -20,27 +20,36 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-#include <assert.h>
+#include <ctype.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <fcntl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
-#include <stdbool.h>
 #include <arpa/inet.h>
-#include <sys/io.h>
 #include <dirent.h>
 #include <fstream>
 #include <sstream>
 #include <string>
 #include <vector>
 #include <algorithm>
-#include <map>
+
+#ifdef __linux__
+#include <sys/io.h>
+#else
+// Stubs so the pure logic can be unit-tested on non-Linux hosts
+static inline void outb(unsigned char, unsigned short) {}
+static inline unsigned char inb(unsigned short) { return 0; }
+static inline int iopl(int) { return -1; }
+#endif
+
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
 
 // Default config file location
 static const char *DEFAULT_CONFIG_PATH = "/etc/fancontrol.conf";
@@ -59,9 +68,8 @@ static int fan_min = 80;       // ~30% - minimum fan speed (never go below this)
 static int fan_max = 255;      // 100% - maximum fan speed
 static int fan_start = 100;    // ~40% - fan speed at temp_low
 const static uint8_t port = 0x2e;
-const static uint8_t fanspeed = 200;
 static uint16_t ecbar = 0x00;
-static char *graphite_server = NULL;
+static std::string graphite_server; // empty = disabled
 static int graphite_port = 0;
 static int cputemp_max_values = 10; // Number of values for rolling average of cpu temperature
 static bool auto_detect_drives = true; // Auto-detect drives by default
@@ -108,6 +116,28 @@ std::string trim(const std::string &str)
     if (first == std::string::npos) return "";
     size_t last = str.find_last_not_of(" \t\r\n");
     return str.substr(first, last - first + 1);
+}
+
+// Parse integer, warn and keep fallback on garbage instead of crashing
+int parse_int(const std::string &value, const char *key, int fallback)
+{
+    try {
+        return std::stoi(value);
+    } catch (...) {
+        printf("Warning: invalid value '%s' for %s, keeping %d\n", value.c_str(), key, fallback);
+        return fallback;
+    }
+}
+
+// Drive names get interpolated into shell commands (smartctl/nvme via popen),
+// so restrict them to alphanumerics to rule out injection
+bool is_valid_drive_name(const std::string &name)
+{
+    if (name.empty()) return false;
+    for (char c : name) {
+        if (!isalnum((unsigned char)c)) return false;
+    }
+    return true;
 }
 
 // Check if a file exists
@@ -194,79 +224,75 @@ std::vector<DriveInfo> detect_drives()
 }
 
 // Parse config file
-bool parse_config_file(const char *config_path, char **drive_list_out)
+bool parse_config_file(const char *config_path, std::string &drive_list_out)
 {
     std::ifstream file(config_path);
     if (!file.is_open()) {
         return false;
     }
 
-    if (debug) printf("Reading config file: %s\n", config_path);
-
     std::string line;
     std::string current_section;
-    static std::string drive_list_storage; // Static to persist after function returns
 
     while (std::getline(file, line)) {
         line = trim(line);
-        
+
         // Skip empty lines and comments
         if (line.empty() || line[0] == '#' || line[0] == ';') continue;
-        
+
         // Check for section header
         if (line[0] == '[' && line.back() == ']') {
             current_section = line.substr(1, line.length() - 2);
             continue;
         }
-        
+
         // Parse key=value pairs
         size_t eq_pos = line.find('=');
         if (eq_pos == std::string::npos) continue;
-        
+
         std::string key = trim(line.substr(0, eq_pos));
         std::string value = trim(line.substr(eq_pos + 1));
-        
+
         // Remove quotes from value if present
-        if (value.length() >= 2 && 
+        if (value.length() >= 2 &&
             ((value.front() == '"' && value.back() == '"') ||
              (value.front() == '\'' && value.back() == '\''))) {
             value = value.substr(1, value.length() - 2);
         }
-        
+
         // General settings
         if (key == "debug") {
             debug = (value == "1" || value == "true" || value == "yes");
         } else if (key == "interval") {
-            interval = std::stoi(value);
+            interval = parse_int(value, "interval", interval);
         } else if (key == "cpu_avg" || key == "cpu_avg_samples") {
-            cputemp_max_values = std::stoi(value);
+            cputemp_max_values = parse_int(value, "cpu_avg_samples", cputemp_max_values);
         } else if (key == "cpu_temp_offset") {
-            cpu_temp_offset = std::stoi(value);
+            cpu_temp_offset = parse_int(value, "cpu_temp_offset", cpu_temp_offset);
         } else if (key == "graphite_server") {
             size_t colon_pos = value.find(':');
             if (colon_pos != std::string::npos) {
-                static std::string server_storage;
-                server_storage = value.substr(0, colon_pos);
-                graphite_server = const_cast<char*>(server_storage.c_str());
-                graphite_port = std::stoi(value.substr(colon_pos + 1));
+                graphite_server = value.substr(0, colon_pos);
+                graphite_port = parse_int(value.substr(colon_pos + 1), "graphite_port", 0);
+            } else {
+                printf("Warning: graphite_server must be <ip:port>, ignoring '%s'\n", value.c_str());
             }
         }
         // Fan curve settings
         else if (key == "temp_low") {
-            temp_low = std::stoi(value);
+            temp_low = parse_int(value, "temp_low", temp_low);
         } else if (key == "temp_high") {
-            temp_high = std::stoi(value);
+            temp_high = parse_int(value, "temp_high", temp_high);
         } else if (key == "fan_min") {
-            fan_min = std::stoi(value);
+            fan_min = parse_int(value, "fan_min", fan_min);
         } else if (key == "fan_max") {
-            fan_max = std::stoi(value);
+            fan_max = parse_int(value, "fan_max", fan_max);
         } else if (key == "fan_start") {
-            fan_start = std::stoi(value);
+            fan_start = parse_int(value, "fan_start", fan_start);
         }
         // Drive settings
         else if (key == "drive_list" || key == "drives") {
-            drive_list_storage = value;
-            *drive_list_out = const_cast<char*>(drive_list_storage.c_str());
+            drive_list_out = value;
             auto_detect_drives = false; // Disable auto-detect if drives are manually specified
         } else if (key == "auto_detect" || key == "auto_detect_drives") {
             auto_detect_drives = (value == "1" || value == "true" || value == "yes");
@@ -279,41 +305,24 @@ bool parse_config_file(const char *config_path, char **drive_list_out)
         }
     }
 
-    file.close();
+    if (debug) printf("Read config file: %s\n", config_path);
     return true;
 }
 
-int split_drive_names(const char *drive_list, char ***drives)
+std::vector<std::string> split_drive_names(const std::string &drive_list)
 {
-  int count = 1;
-  for (const char *p = drive_list; *p; ++p)
-  {
-    if (*p == ',')
-    {
-      ++count;
+    std::vector<std::string> drives;
+    std::stringstream ss(drive_list);
+    std::string item;
+
+    while (std::getline(ss, item, ',')) {
+        item = trim(item);
+        if (!item.empty()) {
+            drives.push_back(item);
+        }
     }
-  }
 
-  *drives = (char **)malloc(count * sizeof(char *));
-  char *list_copy = strdup(drive_list);
-  char *token = strtok(list_copy, ",");
-  int i = 0;
-
-  while (token != NULL)
-  {
-    // Trim whitespace from token
-    while (*token == ' ') token++;
-    char *end = token + strlen(token) - 1;
-    while (end > token && *end == ' ') end--;
-    *(end + 1) = '\0';
-    
-    (*drives)[i] = strdup(token);
-    token = strtok(NULL, ",");
-    ++i;
-  }
-
-  free(list_copy);
-  return count;
+    return drives;
 }
 
 void print_usage() {
@@ -380,8 +389,8 @@ void generate_sample_config(const char *path) {
     fprintf(f, "# Include HDD/SSD (SATA/SAS) drives in monitoring\n");
     fprintf(f, "include_hdd = true\n");
     fprintf(f, "\n");
-    fprintf(f, "# Don't wake sleeping SATA drives - use cached temperature instead\n");
-    fprintf(f, "# This prevents fancontrol from waking drives in standby mode\n");
+    fprintf(f, "# Don't wake sleeping SATA drives for temperature checks\n");
+    fprintf(f, "# Sleeping drives are skipped (they are cool anyway)\n");
     fprintf(f, "respect_standby = true\n");
     fprintf(f, "\n");
     fprintf(f, "# Manual drive list (disables auto_detect if specified)\n");
@@ -434,8 +443,44 @@ void generate_sample_config(const char *path) {
     printf("Sample configuration file generated at: %s\n", path);
 }
 
-void send_to_graphite(int sockfd, const char *message) {
-    send(sockfd, message, strlen(message), 0);
+// Connect to the configured Graphite server. Returns fd or -1.
+int graphite_connect()
+{
+    struct sockaddr_in servaddr;
+    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd < 0) {
+        printf("Error: Could not create Graphite socket\n");
+        return -1;
+    }
+
+    memset(&servaddr, 0, sizeof(servaddr));
+    servaddr.sin_family = AF_INET;
+    servaddr.sin_port = htons(graphite_port);
+
+    if (inet_pton(AF_INET, graphite_server.c_str(), &servaddr.sin_addr) <= 0) {
+        printf("Invalid Graphite address: %s\n", graphite_server.c_str());
+        close(sockfd);
+        return -1;
+    }
+    if (connect(sockfd, (struct sockaddr *)&servaddr, sizeof(servaddr)) < 0) {
+        if (debug) printf("Graphite connection to %s:%d failed\n", graphite_server.c_str(), graphite_port);
+        close(sockfd);
+        return -1;
+    }
+
+    return sockfd;
+}
+
+// Send a metric. MSG_NOSIGNAL so a dead peer can't SIGPIPE-kill the daemon;
+// on failure the socket is closed and reconnected on the next poll cycle.
+void send_to_graphite(int &sockfd, const char *message)
+{
+    if (sockfd < 0) return;
+    if (send(sockfd, message, strlen(message), MSG_NOSIGNAL) < 0) {
+        if (debug) printf("Graphite send failed, will reconnect\n");
+        close(sockfd);
+        sockfd = -1;
+    }
 }
 
 // Simple fan curve calculation
@@ -452,33 +497,38 @@ void send_to_graphite(int sockfd, const char *message) {
 //          temp_low      temp_high
 //
 int calculate_fan_speed(int temperature) {
+    int pwm;
     if (temperature <= temp_low) {
         // Below temp_low: run at minimum speed
-        return fan_min;
+        pwm = fan_min;
     } else if (temperature >= temp_high) {
         // Above temp_high: run at maximum speed
-        return fan_max;
+        pwm = fan_max;
     } else {
         // Linear interpolation between temp_low and temp_high
         // Map temperature range to fan speed range
         double temp_range = temp_high - temp_low;
         double fan_range = fan_max - fan_start;
         double temp_ratio = (temperature - temp_low) / temp_range;
-        int pwm = fan_start + (int)(temp_ratio * fan_range);
-        
+        pwm = fan_start + (int)(temp_ratio * fan_range);
+
         // Ensure we never go below fan_min
         if (pwm < fan_min) pwm = fan_min;
-        
-        return pwm;
     }
+
+    // Clamp to valid PWM range — the EC register is 8-bit, anything else wraps
+    if (pwm < 0) pwm = 0;
+    if (pwm > 255) pwm = 255;
+
+    return pwm;
 }
 
 // Get temperature for NVMe drive - prefer hwmon (no process spawn) over nvme-cli
 int get_nvme_temperature(const char *device)
 {
-    char path[512];
-    int temp = 0;
-    
+    char path[576];
+    int temp = -1; // -1 = no reading yet (0 is a valid temperature)
+
     // First try: hwmon (fastest, no process spawn, reports in millidegrees Celsius)
     // This is the preferred method as it doesn't spawn any processes
     char hwmon_path[256];
@@ -502,24 +552,24 @@ int get_nvme_temperature(const char *device)
         }
         closedir(hwmon_dir);
     }
-    
+
     // Fallback: nvme-cli (spawns process, but reliable)
-    if (temp == 0) {
+    if (temp < 0) {
         char cmd[256];
         char tempstring[128];
-        
-        // For nvme0n1, we need to query nvme0 (the controller, not the namespace)
-        char controller[64];
-        strncpy(controller, device, sizeof(controller) - 1);
-        controller[sizeof(controller) - 1] = '\0';
-        // Remove namespace suffix (e.g., nvme0n1 -> nvme0)
-        char *n_pos = strstr(controller, "n1");
-        if (n_pos && (n_pos != controller)) {
-            *n_pos = '\0';
+
+        // For nvmeXnY, query nvmeX (the controller, not the namespace):
+        // strip everything from the 'n' that follows the controller digits
+        std::string controller(device);
+        if (controller.compare(0, 4, "nvme") == 0) {
+            size_t n_pos = controller.find('n', 4);
+            if (n_pos != std::string::npos) {
+                controller = controller.substr(0, n_pos);
+            }
         }
-        
+
         // Use LC_ALL=C to ensure Celsius output
-        snprintf(cmd, sizeof(cmd), "LC_ALL=C nvme smart-log /dev/%s 2>/dev/null | grep -E '^temperature' | head -1", controller);
+        snprintf(cmd, sizeof(cmd), "LC_ALL=C nvme smart-log /dev/%s 2>/dev/null | grep -E '^temperature' | head -1", controller.c_str());
         FILE *pipe = popen(cmd, "r");
         if (pipe) {
             if (fgets(tempstring, sizeof(tempstring), pipe)) {
@@ -531,8 +581,8 @@ int get_nvme_temperature(const char *device)
             pclose(pipe);
         }
     }
-    
-    return temp;
+
+    return temp < 0 ? 0 : temp;
 }
 
 // Get CPU temperature directly from sysfs (avoids spawning sensors process)
@@ -566,7 +616,7 @@ int get_cpu_temperature_sysfs()
         struct dirent *entry;
         while ((entry = readdir(hwmon_dir)) != nullptr) {
             if (strncmp(entry->d_name, "hwmon", 5) == 0) {
-                char name_path[256];
+                char name_path[320];
                 snprintf(name_path, sizeof(name_path), "/sys/class/hwmon/%s/name", entry->d_name);
                 FILE *nf = fopen(name_path, "r");
                 if (nf) {
@@ -576,7 +626,7 @@ int get_cpu_temperature_sysfs()
                         if (strstr(name, "coretemp") || strstr(name, "k10temp")) {
                             fclose(nf);
                             // Read temp1_input (Package temp)
-                            char temp_path[256];
+                            char temp_path[320];
                             snprintf(temp_path, sizeof(temp_path), "/sys/class/hwmon/%s/temp1_input", entry->d_name);
                             FILE *tf = fopen(temp_path, "r");
                             if (tf) {
@@ -607,10 +657,12 @@ int get_sata_temperature(const char *device)
     char cmd[256];
     char output[256];
     int temp = 0;
-    
-    // Use smartctl with -n standby to avoid waking sleeping drives
-    // If drive is sleeping, smartctl will report "Device is in STANDBY mode" and exit
-    snprintf(cmd, sizeof(cmd), "smartctl -n standby -A -d sat /dev/%s 2>&1", device);
+
+    // With respect_standby, pass -n standby so smartctl reports
+    // "Device is in STANDBY mode" and exits instead of waking the drive
+    const char *standby_flag = respect_standby ? "-n standby" : "";
+
+    snprintf(cmd, sizeof(cmd), "smartctl %s -A -d sat /dev/%s 2>&1", standby_flag, device);
     FILE *pipe = popen(cmd, "r");
     if (pipe) {
         bool drive_sleeping = false;
@@ -634,15 +686,15 @@ int get_sata_temperature(const char *device)
             }
         }
         pclose(pipe);
-        
+
         if (drive_sleeping) {
             return 0; // Ignore sleeping drives
         }
     }
-    
+
     // If that failed, try without -d sat
     if (temp == 0) {
-        snprintf(cmd, sizeof(cmd), "smartctl -n standby -A /dev/%s 2>&1", device);
+        snprintf(cmd, sizeof(cmd), "smartctl %s -A /dev/%s 2>&1", standby_flag, device);
         pipe = popen(cmd, "r");
         if (pipe) {
             bool drive_sleeping = false;
@@ -663,20 +715,57 @@ int get_sata_temperature(const char *device)
                 }
             }
             pclose(pipe);
-            
+
             if (drive_sleeping) {
                 return 0;
             }
         }
     }
-    
+
     return temp;
 }
 
+// Sanity-check settings after config + CLI parsing. Returns false on fatal problems.
+bool validate_settings()
+{
+    bool ok = true;
+
+    if (interval < 1) {
+        printf("Error: interval must be >= 1 second (got %d)\n", interval);
+        ok = false;
+    }
+    if (cputemp_max_values < 1) {
+        printf("Error: cpu_avg_samples must be >= 1 (got %d)\n", cputemp_max_values);
+        ok = false;
+    }
+    if (temp_high <= temp_low) {
+        printf("Error: temp_high (%d) must be greater than temp_low (%d)\n", temp_high, temp_low);
+        ok = false;
+    }
+    if (fan_min < 0 || fan_min > 255 ||
+        fan_start < 0 || fan_start > 255 ||
+        fan_max < 0 || fan_max > 255) {
+        printf("Error: fan_min/fan_start/fan_max must be in range 0-255 (got %d/%d/%d)\n",
+               fan_min, fan_start, fan_max);
+        ok = false;
+    }
+    if (ok && fan_max < fan_start) {
+        printf("Error: fan_max (%d) must be >= fan_start (%d)\n", fan_max, fan_start);
+        ok = false;
+    }
+    if (!graphite_server.empty() && (graphite_port < 1 || graphite_port > 65535)) {
+        printf("Error: graphite port must be in range 1-65535 (got %d)\n", graphite_port);
+        ok = false;
+    }
+
+    return ok;
+}
+
+#ifndef FANCONTROL_NO_MAIN
 int main(int argc, char *argv[])
 {
     const char *config_path = DEFAULT_CONFIG_PATH;
-    char *drive_list = NULL;
+    std::string drive_list;
     bool generate_config = false;
     const char *generate_config_path = NULL;
 
@@ -701,7 +790,7 @@ int main(int argc, char *argv[])
 
     // Load config file if it exists
     if (file_exists(config_path)) {
-        parse_config_file(config_path, &drive_list);
+        parse_config_file(config_path, drive_list);
         if (debug) printf("Loaded configuration from %s\n", config_path);
     }
 
@@ -714,7 +803,7 @@ int main(int argc, char *argv[])
             auto_detect_drives = false;
         } else if (strcmp(argv[i], "--auto_detect") == 0) {
             auto_detect_drives = true;
-            drive_list = NULL;
+            drive_list.clear();
         } else if (strcmp(argv[i], "--no_nvme") == 0) {
             include_nvme = false;
         } else if (strcmp(argv[i], "--no_hdd") == 0) {
@@ -722,29 +811,28 @@ int main(int argc, char *argv[])
         } else if (strncmp(argv[i], "--debug=", 8) == 0) {
             debug = atoi(argv[i] + 8);
         } else if (strncmp(argv[i], "--interval=", 11) == 0) {
-            interval = atoi(argv[i] + 11);
+            interval = parse_int(argv[i] + 11, "interval", interval);
         // Fan curve parameters
         } else if (strncmp(argv[i], "--temp_low=", 11) == 0) {
-            temp_low = atoi(argv[i] + 11);
+            temp_low = parse_int(argv[i] + 11, "temp_low", temp_low);
         } else if (strncmp(argv[i], "--temp_high=", 12) == 0) {
-            temp_high = atoi(argv[i] + 12);
+            temp_high = parse_int(argv[i] + 12, "temp_high", temp_high);
         } else if (strncmp(argv[i], "--fan_min=", 10) == 0) {
-            fan_min = atoi(argv[i] + 10);
+            fan_min = parse_int(argv[i] + 10, "fan_min", fan_min);
         } else if (strncmp(argv[i], "--fan_start=", 12) == 0) {
-            fan_start = atoi(argv[i] + 12);
+            fan_start = parse_int(argv[i] + 12, "fan_start", fan_start);
         } else if (strncmp(argv[i], "--fan_max=", 10) == 0) {
-            fan_max = atoi(argv[i] + 10);
+            fan_max = parse_int(argv[i] + 10, "fan_max", fan_max);
         } else if (strncmp(argv[i], "--cpu_avg=", 10) == 0) {
-            cputemp_max_values = atof(argv[i] + 10);
+            cputemp_max_values = parse_int(argv[i] + 10, "cpu_avg", cputemp_max_values);
         } else if (strncmp(argv[i], "--cpu_temp_offset=", 18) == 0) {
-            cpu_temp_offset = atoi(argv[i] + 18);
+            cpu_temp_offset = parse_int(argv[i] + 18, "cpu_temp_offset", cpu_temp_offset);
         } else if (strncmp(argv[i], "--graphite_server=", 18) == 0) {
-            char *server_info = argv[i] + 18;
-            char *colon_pos = strchr(server_info, ':');
-            if (colon_pos) {
-                *colon_pos = '\0';
-                graphite_server = server_info;
-                graphite_port = atoi(colon_pos + 1);
+            std::string server_info = argv[i] + 18;
+            size_t colon_pos = server_info.find(':');
+            if (colon_pos != std::string::npos) {
+                graphite_server = server_info.substr(0, colon_pos);
+                graphite_port = parse_int(server_info.substr(colon_pos + 1), "graphite_port", 0);
             } else {
                 printf("Invalid Graphite server format. Expected <ip:port>\n");
                 return 1;
@@ -761,43 +849,49 @@ int main(int argc, char *argv[])
         }
     }
 
+    if (!validate_settings()) {
+        return 1;
+    }
+
     // Build drive list
-    char **drives = NULL;
-    int count = 0;
-    std::vector<DriveInfo> detected_drives;
-    
-    if (auto_detect_drives || drive_list == NULL) {
+    std::vector<std::string> drives;
+
+    if (auto_detect_drives || drive_list.empty()) {
         // Auto-detect drives
-        detected_drives = detect_drives();
-        
+        std::vector<DriveInfo> detected_drives = detect_drives();
+
         if (detected_drives.empty()) {
             printf("Error: No drives detected. Please specify drives manually with --drive_list\n");
             return 1;
         }
-        
-        count = detected_drives.size();
-        drives = (char **)malloc(count * sizeof(char *));
-        for (int i = 0; i < count; ++i) {
-            drives[i] = strdup(detected_drives[i].name.c_str());
-        }
-        
-        printf("Auto-detected %d drive(s):\n", count);
+
+        printf("Auto-detected %zu drive(s):\n", detected_drives.size());
         for (const auto &drive : detected_drives) {
+            drives.push_back(drive.name);
             printf("  - %s (%s)\n", drive.name.c_str(), drive.type.c_str());
         }
     } else {
-        count = split_drive_names(drive_list, &drives);
-        
-        if (count == 0) {
+        drives = split_drive_names(drive_list);
+
+        if (drives.empty()) {
             printf("Error: No drives specified.\n");
             return 1;
         }
-        
-        printf("Monitoring %d manually specified drive(s):\n", count);
-        for (int i = 0; i < count; ++i) {
-            printf("  - %s\n", drives[i]);
+
+        printf("Monitoring %zu manually specified drive(s):\n", drives.size());
+        for (const auto &drive : drives) {
+            printf("  - %s\n", drive.c_str());
         }
     }
+
+    // Drive names end up in shell commands — reject anything suspicious
+    for (const auto &drive : drives) {
+        if (!is_valid_drive_name(drive)) {
+            printf("Error: invalid drive name '%s' (only alphanumeric names allowed)\n", drive.c_str());
+            return 1;
+        }
+    }
+    const int count = (int)drives.size();
 
     // Print configuration summary
     if (debug) {
@@ -808,8 +902,8 @@ int main(int argc, char *argv[])
         printf("    Below %d°C -> %d PWM (%.0f%%) [minimum]\n", temp_low, fan_min, (fan_min/255.0)*100);
         printf("    At %d°C    -> %d PWM (%.0f%%) [start ramping]\n", temp_low, fan_start, (fan_start/255.0)*100);
         printf("    At %d°C    -> %d PWM (%.0f%%) [full speed]\n", temp_high, fan_max, (fan_max/255.0)*100);
-        if (graphite_server) {
-            printf("  Graphite: %s:%d\n", graphite_server, graphite_port);
+        if (!graphite_server.empty()) {
+            printf("  Graphite: %s:%d\n", graphite_server.c_str(), graphite_port);
         }
         printf("\n");
     }
@@ -855,39 +949,14 @@ int main(int argc, char *argv[])
 
     int maxtemp = 0;
 
-    int *cputemp_values = (int *)calloc(cputemp_max_values, sizeof(int));  // Store last N values
+    std::vector<int> cputemp_values(cputemp_max_values, 0);  // Store last N values
     int cputemp_index = 0;  // Circular index
     int cputemp_count = 0;  // Number of values stored
     int cputemp_sum = 0;    // Sum of stored values
     int cpu_avg_temp = 0; // Average CPU temperature
 
-    // Setup graphite socket
+    // Setup graphite socket (reconnected on failure inside the loop)
     int graphite_sockfd = -1;
-    if (graphite_server) {
-        struct sockaddr_in servaddr;
-        graphite_sockfd = socket(AF_INET, SOCK_STREAM, 0);
-        if (graphite_sockfd < 0) {
-            printf("Error: Could not create socket\n");
-        }
-        else
-        {
-            memset(&servaddr, 0, sizeof(servaddr));
-            servaddr.sin_family = AF_INET;
-            servaddr.sin_port = htons(graphite_port);
-
-            // Convert IPv4 and IPv6 addresses from text to binary form
-            if (inet_pton(AF_INET, graphite_server, &servaddr.sin_addr) <= 0) {
-                printf("Invalid address/ Address not supported \n");
-                close(graphite_sockfd);
-                graphite_sockfd = -1;
-            }
-            else if (connect(graphite_sockfd, (struct sockaddr *)&servaddr, sizeof(servaddr)) < 0) {
-                printf("Connection Failed \n");
-                close(graphite_sockfd);
-                graphite_sockfd = -1;
-            }
-        }
-    }
 
     printf("Fan control started. Monitoring %d drives...\n", count);
 
@@ -895,29 +964,34 @@ int main(int argc, char *argv[])
     {
         maxtemp = 0;
 
+        // (Re)connect Graphite if configured and not connected
+        if (!graphite_server.empty() && graphite_sockfd < 0) {
+            graphite_sockfd = graphite_connect();
+        }
+
         // Get temperature for each drive
         for (int i = 0; i < count; ++i)
         {
             int temp = 0;
             bool is_nvme_drive = is_nvme(drives[i]);
-            
+
             if (is_nvme_drive) {
-                temp = get_nvme_temperature(drives[i]);
+                temp = get_nvme_temperature(drives[i].c_str());
             } else {
-                temp = get_sata_temperature(drives[i]);
+                temp = get_sata_temperature(drives[i].c_str());
             }
 
             if (temp > maxtemp) maxtemp = temp;
 
-            if (debug) printf("Drive: /dev/%s (%s) temperature: %d°C\n", 
-                            drives[i], 
+            if (debug) printf("Drive: /dev/%s (%s) temperature: %d°C\n",
+                            drives[i].c_str(),
                             is_nvme_drive ? "NVMe" : "SATA",
                             temp);
 
             // Send disk temperature to Graphite
-            if (graphite_sockfd > 0) {
+            if (graphite_sockfd >= 0) {
                 char message[256];
-                snprintf(message, sizeof(message), "fancontrol.%s %d %ld\n", drives[i], temp, time(NULL));
+                snprintf(message, sizeof(message), "fancontrol.%s %d %ld\n", drives[i].c_str(), temp, time(NULL));
                 send_to_graphite(graphite_sockfd, message);
             }
         }
@@ -967,7 +1041,7 @@ int main(int argc, char *argv[])
 
         if (debug) printf("Max Temperature: %d°C\n", maxtemp);
 
-        if (graphite_sockfd > 0) {
+        if (graphite_sockfd >= 0) {
             char message[256];
 
             snprintf(message, sizeof(message), "fancontrol.maxtemp %d %ld\n", maxtemp, time(NULL));
@@ -987,7 +1061,7 @@ int main(int argc, char *argv[])
         ecwrite(0x73, pwm);
 
         // Send PWM value to Graphite if configured
-        if (graphite_sockfd > 0) {
+        if (graphite_sockfd >= 0) {
             char message[256];
 
             // Send PWM value
@@ -1002,13 +1076,5 @@ int main(int argc, char *argv[])
         // Sleep at end of loop
         sleep(interval);
     }
-
-    // Cleanup
-    for (int i = 0; i < count; ++i) {
-        free(drives[i]);
-    }
-    free(drives);
-    iopl(0);
-    free(cputemp_values);
-    return 0;
 }
+#endif // FANCONTROL_NO_MAIN
