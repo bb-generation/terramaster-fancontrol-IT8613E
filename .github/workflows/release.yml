@@ -20,7 +20,14 @@ jobs:
         run: make test
 
       - name: Build
-        run: make
+        run: make release
+
+      - name: Verify static linking
+        run: |
+          file fancontrol
+          if ldd fancontrol 2>&1 | grep -q '=>'; then
+            echo "ERROR: binary is dynamically linked"; exit 1
+          fi
 
       - name: Generate Changelog
         id: changelog

@@ -4,6 +4,11 @@ CXXFLAGS ?= -O2 -Wall -Wextra
 fancontrol: fancontrol.cpp
 	$(CXX) $(CXXFLAGS) -o $@ $<
 
+# Fully static binary for releases — runs on any x86_64 Linux regardless of glibc age
+.PHONY: release
+release: fancontrol.cpp
+	$(CXX) $(CXXFLAGS) -static -o fancontrol $<
+
 tests: tests.cpp fancontrol.cpp
 	$(CXX) $(CXXFLAGS) -o $@ tests.cpp
 
