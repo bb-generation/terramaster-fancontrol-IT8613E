@@ -12,7 +12,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0  # full history so the changelog can diff against the previous tag
 
@@ -33,27 +33,23 @@ jobs:
         run: tar czf fancontrol-linux-x86_64.tar.gz fancontrol fancontrol.conf fancontrol.service install_service.sh
 
       - name: Generate Changelog
-        id: changelog
         run: |
           # Previous tag (excluding the one being released)
           PREV_TAG=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || echo "")
 
           if [ -z "$PREV_TAG" ]; then
             echo "No previous tag found. Listing all commits."
-            LOG=$(git log --oneline)
+            git log --oneline > changelog.md
           else
             echo "Previous tag is $PREV_TAG. Listing commits from $PREV_TAG to HEAD."
-            LOG=$(git log --oneline "$PREV_TAG"..HEAD)
+            git log --oneline "$PREV_TAG"..HEAD > changelog.md
           fi
 
-          echo "changelog<<EOF" >> $GITHUB_OUTPUT
-          echo "$LOG" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
       - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          body: ${{ steps.changelog.outputs.changelog }}
-          files: |
-            fancontrol
-            fancontrol-linux-x86_64.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            fancontrol fancontrol-linux-x86_64.tar.gz \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file changelog.md
