@@ -11,11 +11,12 @@ Initially I made the changes described in [this post](https://xpenology.com/foru
 
 1. **Configuration file support** - All settings can be configured via `/etc/fancontrol.conf`
 2. **Auto-detection of drives** - Automatically detects HDDs, SSDs, and NVMe drives
-3. **NVMe support** - Full support for NVMe drive temperature monitoring
-4. **Graphite integration** - Optional reporting to a Graphite server for monitoring in Grafana
-5. **Simple fan curve** - Easy-to-understand linear fan speed control based on temperature thresholds
-
-<img width="883" alt="image" src="https://github.com/Nikotine1/terramaster-fancontrol-IT8613E/assets/1538384/a89e8c9d-1ada-490a-b380-9101bc4fa552">
+3. **NVMe support** - Full support for NVMe drive temperature monitoring (hwmon preferred, nvme-cli fallback)
+4. **Standby-aware** - Doesn't wake sleeping SATA drives for temperature checks
+5. **Simple fan curve** - Linear fan speed control between two temperature thresholds
+6. **Monitor mode** - `--monitor-only` prints temperatures and the computed fan speed without touching the hardware
+7. **Graphite integration** - Optional reporting to a Graphite server for monitoring in Grafana (auto-reconnects)
+8. **Validated configuration** - Bad config values are rejected or warned about instead of crashing the daemon
 
 ## Installation:
 Warning: As from Truenas 24.10.1, [the home folder is no longer executable](https://forums.truenas.com/t/shell-script-permission-denied-with-24-10-1/27941). Instead, use the data pool for your scripts.
@@ -33,9 +34,11 @@ apt install nvme-cli
 
 ### Build
 
+Alternatively, skip building and grab the `fancontrol` binary from the [Releases page](https://github.com/schudt/terramaster-fancontrol-IT8613E/releases).
+
 1. Clone the repo
    ```
-   git clone https://github.com/Nikotine1/terramaster-fancontrol-IT8613E
+   git clone https://github.com/schudt/terramaster-fancontrol-IT8613E
    ```
 
 2. Build.
@@ -49,6 +52,11 @@ apt install nvme-cli
      sudo docker run --rm -v "$PWD":/usr/src/myapp -w /usr/src/myapp gcc g++ -O2 -Wall -o fancontrol fancontrol.cpp
      ```
      Note: use `g++` (not `gcc`) — the source is C++ and needs libstdc++ linked.
+
+3. Optional: run the unit tests (works on Linux and macOS, no root needed):
+   ```
+   make test
+   ```
 
 ### Quick Start (Auto-detection)
 
@@ -196,6 +204,8 @@ interval = 10
 auto_detect = true
 include_nvme = true
 include_hdd = true
+# Don't wake sleeping SATA drives for temperature checks
+respect_standby = true
 # drive_list = sda,sdb,sdc,sdd,nvme0n1
 
 [fan_curve]
