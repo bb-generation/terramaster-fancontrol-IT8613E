@@ -12,25 +12,29 @@ Initially I made the changes described in [this post](https://xpenology.com/foru
 1. **Configuration file support** - All settings can be configured via `/etc/fancontrol.conf`
 2. **Auto-detection of drives** - Automatically detects HDDs, SSDs, and NVMe drives
 3. **NVMe support** - Full support for NVMe drive temperature monitoring (hwmon preferred, nvme-cli fallback)
-4. **Standby-aware** - Doesn't wake sleeping SATA drives for temperature checks
-5. **Simple fan curve** - Linear fan speed control between two temperature thresholds
-6. **Monitor mode** - `--monitor-only` prints temperatures and the computed fan speed without touching the hardware
-7. **Graphite integration** - Optional reporting to a Graphite server for monitoring in Grafana (auto-reconnects)
-8. **Validated configuration** - Bad config values are rejected or warned about instead of crashing the daemon
+4. **Silent hwmon temperature source (optional)** - `temp_source = hwmon` reads all drive temperatures from the kernel (`drivetemp` / `nvme` hwmon sensors): no external tools, no HDD click on every poll. See [Drive Temperature Source](#drive-temperature-source)
+5. **Standby-aware** - Doesn't wake sleeping SATA drives for temperature checks
+6. **Simple fan curve** - Linear fan speed control between two temperature thresholds
+7. **Monitor mode** - `--monitor-only` prints temperatures and the computed fan speed without touching the hardware
+8. **Graphite integration** - Optional reporting to a Graphite server for monitoring in Grafana (auto-reconnects)
+9. **Validated configuration** - Bad config values are rejected or warned about instead of crashing the daemon
 
 ## Installation:
 Warning: As from Truenas 24.10.1, [the home folder is no longer executable](https://forums.truenas.com/t/shell-script-permission-denied-with-24-10-1/27941). Instead, use the data pool for your scripts.
 
 ### Prerequisites
 
-Install required tools:
-```bash
-# For SATA/SAS drive temperature monitoring
-apt install smartmontools lm-sensors
+What you need depends on the [drive temperature source](#drive-temperature-source):
 
-# For NVMe drive temperature monitoring (optional but recommended)
-apt install nvme-cli
-```
+- **`temp_source = smart`** (default) — install the tools that read the drives:
+  ```bash
+  # For SATA/SAS drive temperature monitoring
+  apt install smartmontools lm-sensors
+
+  # For NVMe drive temperature monitoring (optional but recommended)
+  apt install nvme-cli
+  ```
+- **`temp_source = hwmon`** — nothing to install: no `smartmontools`, `lm-sensors`, or `nvme-cli`. Temperatures come straight from the kernel. The only requirement is the `drivetemp` kernel module for SATA/SAS drives (NVMe sensors come with the regular `nvme` driver).
 
 ### Install from Release (no toolchain needed)
 
@@ -151,6 +155,9 @@ Drive Options:
   --auto_detect         Auto-detect drives (default)
   --no_nvme             Exclude NVMe drives from auto-detection
   --no_hdd              Exclude HDD/SSD drives from auto-detection
+  --temp_source=<smart|hwmon>  Where drive temperatures come from (default: smart)
+                        smart: smartctl (SATA/SAS), hwmon or nvme-cli (NVMe)
+                        hwmon: kernel sensors only (drivetemp, nvme), no tools
 
 Fan Curve:
   --temp_low=<value>    Temperature for minimum fan speed (default: 40°C)
@@ -213,7 +220,9 @@ interval = 10
 auto_detect = true
 include_nvme = true
 include_hdd = true
-# Don't wake sleeping SATA drives for temperature checks
+# Where drive temperatures come from: smart (default) or hwmon
+temp_source = smart
+# Don't wake sleeping SATA drives for temperature checks (smart only)
 respect_standby = true
 # drive_list = sda,sdb,sdc,sdd,nvme0n1
 
@@ -242,6 +251,54 @@ The program automatically detects drives by scanning `/sys/block/`. It identifie
 - **SSDs** - Non-rotational SATA drives
 - **NVMe** - NVMe drives (detected by device name starting with `nvme`)
 
-Temperature is read using:
-- `smartctl` for SATA/SAS drives
-- `nvme smart-log` or hwmon for NVMe drives
+How the temperature of each drive is read depends on `temp_source`, see below.
+
+## Drive Temperature Source
+
+`temp_source` in the `[drives]` section (or `--temp_source=` on the command line) selects how drive temperatures are read:
+
+| | `smart` (default) | `hwmon` |
+|---|---|---|
+| SATA/SAS | `smartctl -A` | kernel `drivetemp` sensor |
+| NVMe | hwmon, falling back to `nvme smart-log` | kernel `nvme` sensor |
+| External tools | `smartmontools`, `nvme-cli`, `lm-sensors` | none |
+| HDD noise per poll | may click (see below) | silent |
+| Sensor unreadable | drive counts as 0°C | fans go to full speed |
+
+### Why `hwmon`
+
+`smartctl -A` reads the SMART attribute table, which many HDDs keep in a reserved area on the platters. Every poll moves the heads there and back, so with a 10 s interval you hear a short click from every drive. It's noise, not wear (no extra load/unload cycles), but in a living room it's noticeable.
+
+The kernel's `drivetemp` driver asks the drive through SCT Command Transport instead, which is answered by the drive electronics without moving the heads. (Only drives without SCT support fall back to reading SMART attributes.) NVMe drives expose their sensor through the regular `nvme` driver. Both show up under `/sys/class/hwmon/`, which is also where TrueNAS SCALE gets the disk temperatures for its reporting.
+
+### Enabling it
+
+1. Make sure `drivetemp` is loaded (needed for SATA/SAS drives only):
+   ```bash
+   lsmod | grep drivetemp
+   ```
+   If nothing shows up, load it now and on every boot:
+   ```bash
+   sudo modprobe drivetemp
+   echo drivetemp | sudo tee /etc/modules-load.d/drivetemp.conf
+   ```
+   TrueNAS SCALE already loads it for its own disk temperature reporting.
+
+2. Set the source in `/etc/fancontrol.conf`:
+   ```ini
+   [drives]
+   temp_source = hwmon
+   ```
+
+3. Check that every drive reports a sensible temperature:
+   ```bash
+   sudo fancontrol --monitor-only
+   ```
+   Then restart the service: `sudo systemctl restart fancontrol.service`.
+
+### How it behaves
+
+- Each drive is matched to its sensor through the device it belongs to, on every poll. hwmon numbers (`hwmon5`, `hwmon6`, …) follow driver load order, not drive names, and can change after a reboot or update, so they're never used for the mapping.
+- If a drive's sensor can't be found or read (for example because `drivetemp` isn't loaded), fancontrol logs a warning and runs the fans at **full speed** until the sensor is back. There is no silent fallback to `smartctl`.
+- `respect_standby` has no effect: the kernel driver is queried on every poll. According to the `drivetemp` documentation, reading the temperature can reset the spin-down timer on some drives, so drives configured to spin down may stay awake. If your drives spin down, keep `temp_source = smart`.
+- Because the reads are cheap and silent, a short `interval` (the default 10 s) is fine.
