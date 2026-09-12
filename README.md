@@ -48,11 +48,11 @@ apt install nvme-cli
 
 ### Install from Release (no toolchain needed)
 
-Each [release](https://github.com/schudt/terramaster-fancontrol-IT8613E/releases) ships `fancontrol-linux-x86_64.tar.gz` containing the static binary, sample config, systemd unit, and installer. Extract it into a directory on a pool — the service runs the binary straight from there, and TrueNAS wipes anything outside a pool on update:
+Each [release](https://github.com/bb-generation/terramaster-fancontrol-IT8613E/releases) ships `fancontrol-linux-x86_64.tar.gz` containing the static binary, sample config, systemd unit, and installer. Extract it into a directory on a pool — the service runs the binary straight from there, and TrueNAS wipes anything outside a pool on update:
 
 ```bash
 mkdir -p /mnt/yourpool/fancontrol && cd /mnt/yourpool/fancontrol
-curl -sL https://github.com/schudt/terramaster-fancontrol-IT8613E/releases/latest/download/fancontrol-linux-x86_64.tar.gz | tar xz
+curl -sL https://github.com/bb-generation/terramaster-fancontrol-IT8613E/releases/latest/download/fancontrol-linux-x86_64.tar.gz | tar xz
 sudo ./install_service.sh
 ```
 
@@ -62,7 +62,7 @@ The binary is fully static — runs on any x86_64 Linux, no library requirements
 
 1. Clone the repo
    ```
-   git clone https://github.com/schudt/terramaster-fancontrol-IT8613E
+   git clone https://github.com/bb-generation/terramaster-fancontrol-IT8613E
    ```
 
 2. Build.
