@@ -84,7 +84,7 @@ enum TempSource {
     TEMP_SOURCE_SMART, // smartctl for SATA/SAS, hwmon with nvme-cli fallback for NVMe
     TEMP_SOURCE_HWMON  // kernel hwmon only: drivetemp for SATA/SAS, nvme driver for NVMe
 };
-static TempSource temp_source = TEMP_SOURCE_SMART;
+static TempSource temp_source = TEMP_SOURCE_HWMON;
 
 // Drive structure to hold drive info
 struct DriveInfo {
@@ -364,9 +364,9 @@ void print_usage() {
            "  --auto_detect         Auto-detect drives (default)\n"
            "  --no_nvme             Exclude NVMe drives from auto-detection\n"
            "  --no_hdd              Exclude HDD/SSD drives from auto-detection\n"
-           "  --temp_source=<smart|hwmon>  Where drive temperatures come from (default: smart)\n"
-           "                        smart: smartctl (SATA/SAS), hwmon or nvme-cli (NVMe)\n"
+           "  --temp_source=<hwmon|smart>  Where drive temperatures come from (default: hwmon)\n"
            "                        hwmon: kernel sensors only (drivetemp, nvme), no tools\n"
+           "                        smart: smartctl (SATA/SAS), hwmon or nvme-cli (NVMe)\n"
            "\n"
            "Fan Curve (simple, recommended):\n"
            "  --temp_low=<value>    Temperature for minimum fan speed (default: 40°C)\n"
@@ -419,13 +419,14 @@ void generate_sample_config(const char *path) {
     fprintf(f, "include_hdd = true\n");
     fprintf(f, "\n");
     fprintf(f, "# Where drive temperatures are read from:\n");
-    fprintf(f, "#   smart - smartctl for SATA/SAS, hwmon or nvme-cli for NVMe (default)\n");
-    fprintf(f, "#   hwmon - kernel sensors in /sys/class/hwmon for all drives: the drivetemp\n");
-    fprintf(f, "#           module for SATA/SAS, the nvme driver for NVMe. No external tools\n");
-    fprintf(f, "#           needed, and HDDs don't click on every poll. Needs drivetemp loaded\n");
-    fprintf(f, "#           (modprobe drivetemp). If a drive's sensor can't be read, fans go to\n");
-    fprintf(f, "#           full speed until it is back.\n");
-    fprintf(f, "temp_source = smart\n");
+    fprintf(f, "#   hwmon - default. Kernel sensors in /sys/class/hwmon for all drives: the\n");
+    fprintf(f, "#           drivetemp module for SATA/SAS, the nvme driver for NVMe. No\n");
+    fprintf(f, "#           external tools needed, and HDDs don't click on every poll. Needs\n");
+    fprintf(f, "#           drivetemp loaded (modprobe drivetemp). If a drive's sensor can't\n");
+    fprintf(f, "#           be read, the fans go to full speed until it is back.\n");
+    fprintf(f, "#   smart - smartctl for SATA/SAS, hwmon or nvme-cli for NVMe. Needs\n");
+    fprintf(f, "#           smartmontools installed (and nvme-cli for NVMe).\n");
+    fprintf(f, "temp_source = hwmon\n");
     fprintf(f, "\n");
     fprintf(f, "# Don't wake sleeping SATA drives for temperature checks\n");
     fprintf(f, "# Sleeping drives are skipped (they are cool anyway)\n");

@@ -308,6 +308,9 @@ static void test_get_hwmon_drive_temperature()
 
 int main()
 {
+    // Compiled-in default, checked before any test mutates the globals
+    CHECK(temp_source == TEMP_SOURCE_HWMON);
+
     test_trim();
     test_split_drive_names();
     test_is_valid_drive_name();
