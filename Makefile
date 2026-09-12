@@ -12,7 +12,7 @@ release: fancontrol.cpp
 tests: tests.cpp fancontrol.cpp
 	$(CXX) $(CXXFLAGS) -o $@ tests.cpp
 
-.PHONY: test install clean
+.PHONY: test install install-in-place clean
 test: tests
 	./tests
 
@@ -22,3 +22,8 @@ install: fancontrol
 
 clean:
 	rm -f fancontrol tests
+
+# For read-only root filesystems (e.g. TrueNAS SCALE): run the binary and config
+# from this directory, install only the systemd unit. Needs root.
+install-in-place: fancontrol
+	./install_service.sh --in-place

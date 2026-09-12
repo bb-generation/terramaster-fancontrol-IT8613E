@@ -127,6 +127,12 @@ Easiest: build + install + start in one go (wraps `install_service.sh`):
 sudo make install
 ```
 
+On a system with a read-only root filesystem — TrueNAS SCALE, for example, where `/usr/local/bin` can't be written — keep this directory on a pool and install in place. The binary and the config stay where they are, and only the systemd unit is written to `/etc/systemd/system`:
+```bash
+sudo make install-in-place    # or: sudo ./install_service.sh --in-place
+```
+The generated unit points `ExecStart` at those paths, and when they live under `/mnt` it also waits for `zfs-mount.service`, so the pool is mounted before fancontrol starts.
+
 Or manually:
 
 1. Copy the binary and config:
