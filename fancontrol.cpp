@@ -79,6 +79,13 @@ static int cpu_temp_offset = 20; // CPU temperature offset compared to drives
 static bool respect_standby = true; // Don't wake sleeping drives for temperature check
 static bool monitor_only = false; // Monitor mode: only output temps, don't control fans
 
+// Where drive temperatures come from
+enum TempSource {
+    TEMP_SOURCE_SMART, // smartctl for SATA/SAS, hwmon with nvme-cli fallback for NVMe
+    TEMP_SOURCE_HWMON  // kernel hwmon only: drivetemp for SATA/SAS, nvme driver for NVMe
+};
+static TempSource temp_source = TEMP_SOURCE_HWMON;
+
 // Drive structure to hold drive info
 struct DriveInfo {
     std::string name;
@@ -128,6 +135,21 @@ int parse_int(const std::string &value, const char *key, int fallback)
         printf("Warning: invalid value '%s' for %s, keeping %d\n", value.c_str(), key, fallback);
         return fallback;
     }
+}
+
+// Parse a temp_source value ("smart" or "hwmon"). Leaves out untouched on garbage.
+bool parse_temp_source(const std::string &value, TempSource &out)
+{
+    if (value == "smart") {
+        out = TEMP_SOURCE_SMART;
+    } else if (value == "hwmon") {
+        out = TEMP_SOURCE_HWMON;
+    } else {
+        printf("Warning: invalid value '%s' for temp_source (expected smart or hwmon), keeping %s\n",
+               value.c_str(), out == TEMP_SOURCE_HWMON ? "hwmon" : "smart");
+        return false;
+    }
+    return true;
 }
 
 // Drive names get interpolated into shell commands (smartctl/nvme via popen),
@@ -303,6 +325,8 @@ bool parse_config_file(const char *config_path, std::string &drive_list_out)
             include_hdd = (value == "1" || value == "true" || value == "yes");
         } else if (key == "respect_standby") {
             respect_standby = (value == "1" || value == "true" || value == "yes");
+        } else if (key == "temp_source") {
+            parse_temp_source(value, temp_source);
         }
     }
 
@@ -340,6 +364,9 @@ void print_usage() {
            "  --auto_detect         Auto-detect drives (default)\n"
            "  --no_nvme             Exclude NVMe drives from auto-detection\n"
            "  --no_hdd              Exclude HDD/SSD drives from auto-detection\n"
+           "  --temp_source=<hwmon|smart>  Where drive temperatures come from (default: hwmon)\n"
+           "                        hwmon: kernel sensors only (drivetemp, nvme), no tools\n"
+           "                        smart: smartctl (SATA/SAS), hwmon or nvme-cli (NVMe)\n"
            "\n"
            "Fan Curve (simple, recommended):\n"
            "  --temp_low=<value>    Temperature for minimum fan speed (default: 40°C)\n"
@@ -391,8 +418,19 @@ void generate_sample_config(const char *path) {
     fprintf(f, "# Include HDD/SSD (SATA/SAS) drives in monitoring\n");
     fprintf(f, "include_hdd = true\n");
     fprintf(f, "\n");
+    fprintf(f, "# Where drive temperatures are read from:\n");
+    fprintf(f, "#   hwmon - default. Kernel sensors in /sys/class/hwmon for all drives: the\n");
+    fprintf(f, "#           drivetemp module for SATA/SAS, the nvme driver for NVMe. No\n");
+    fprintf(f, "#           external tools needed, and HDDs don't click on every poll. Needs\n");
+    fprintf(f, "#           drivetemp loaded (modprobe drivetemp). If a drive's sensor can't\n");
+    fprintf(f, "#           be read, the fans go to full speed until it is back.\n");
+    fprintf(f, "#   smart - smartctl for SATA/SAS, hwmon or nvme-cli for NVMe. Needs\n");
+    fprintf(f, "#           smartmontools installed (and nvme-cli for NVMe).\n");
+    fprintf(f, "temp_source = hwmon\n");
+    fprintf(f, "\n");
     fprintf(f, "# Don't wake sleeping SATA drives for temperature checks\n");
     fprintf(f, "# Sleeping drives are skipped (they are cool anyway)\n");
+    fprintf(f, "# Only applies to temp_source = smart\n");
     fprintf(f, "respect_standby = true\n");
     fprintf(f, "\n");
     fprintf(f, "# Manual drive list (disables auto_detect if specified)\n");
@@ -525,6 +563,83 @@ int calculate_fan_speed(int temperature) {
     return pwm;
 }
 
+// For nvmeXnY return the controller nvmeX: strip everything from the 'n'
+// that follows the controller digits
+std::string nvme_controller_name(const std::string &device)
+{
+    std::string controller(device);
+    if (controller.compare(0, 4, "nvme") == 0) {
+        size_t n_pos = controller.find('n', 4);
+        if (n_pos != std::string::npos) {
+            controller = controller.substr(0, n_pos);
+        }
+    }
+    return controller;
+}
+
+// Canonical path with all symlinks resolved, or "" if it doesn't exist
+std::string resolve_path(const std::string &path)
+{
+    char *resolved = realpath(path.c_str(), NULL);
+    if (!resolved) return "";
+    std::string result(resolved);
+    free(resolved);
+    return result;
+}
+
+// Read a drive temperature from the kernel hwmon class: the drivetemp sensor
+// for SATA/SAS, the nvme sensor for NVMe. Pure sysfs reads, no process spawn
+// and no SMART access (which makes some HDDs move their heads, audibly).
+// Returns °C, or -1 if no sensor is found or it can't be read.
+//
+// hwmonN numbering follows driver probe order, not drive names, and can change
+// across reboots, so the sensor is matched to the drive through its parent
+// device on every call instead of being cached.
+int get_hwmon_drive_temperature(const std::string &device, const std::string &sysfs = "/sys")
+{
+    const bool nvme = is_nvme(device);
+    const char *driver = nvme ? "nvme" : "drivetemp";
+
+    // Devices the sensor can hang off. SATA/SAS: the SCSI device behind the
+    // block device. NVMe: the controller; with native multipath the block
+    // device sits under the subsystem, so also try the controller by name,
+    // and its PCI function where older kernels registered the sensor.
+    std::vector<std::string> owners;
+    owners.push_back(resolve_path(sysfs + "/block/" + device + "/device"));
+    if (nvme) {
+        std::string controller = sysfs + "/class/nvme/" + nvme_controller_name(device);
+        owners.push_back(resolve_path(controller));
+        owners.push_back(resolve_path(controller + "/device"));
+    }
+
+    std::string hwmon_class = sysfs + "/class/hwmon";
+    DIR *dir = opendir(hwmon_class.c_str());
+    if (!dir) return -1;
+
+    int temp = -1;
+    struct dirent *entry;
+    while (temp < 0 && (entry = readdir(dir)) != nullptr) {
+        if (strncmp(entry->d_name, "hwmon", 5) != 0) continue;
+        std::string base = hwmon_class + "/" + entry->d_name;
+
+        std::ifstream name_file(base + "/name");
+        std::string name;
+        if (!std::getline(name_file, name) || trim(name) != driver) continue;
+
+        std::string owner = resolve_path(base + "/device");
+        if (owner.empty() || std::find(owners.begin(), owners.end(), owner) == owners.end()) continue;
+
+        std::ifstream temp_file(base + "/temp1_input");
+        int millidegrees;
+        if (temp_file >> millidegrees) {
+            temp = millidegrees / 1000; // sysfs reports millidegrees Celsius
+        }
+    }
+    closedir(dir);
+
+    return temp;
+}
+
 // Get temperature for NVMe drive - prefer hwmon (no process spawn) over nvme-cli
 int get_nvme_temperature(const char *device)
 {
@@ -560,15 +675,8 @@ int get_nvme_temperature(const char *device)
         char cmd[256];
         char tempstring[128];
 
-        // For nvmeXnY, query nvmeX (the controller, not the namespace):
-        // strip everything from the 'n' that follows the controller digits
-        std::string controller(device);
-        if (controller.compare(0, 4, "nvme") == 0) {
-            size_t n_pos = controller.find('n', 4);
-            if (n_pos != std::string::npos) {
-                controller = controller.substr(0, n_pos);
-            }
-        }
+        // Query the controller, not the namespace
+        std::string controller = nvme_controller_name(device);
 
         // Use LC_ALL=C to ensure Celsius output
         snprintf(cmd, sizeof(cmd), "LC_ALL=C nvme smart-log /dev/%s 2>/dev/null | grep -E '^temperature' | head -1", controller.c_str());
@@ -771,6 +879,10 @@ int main(int argc, char *argv[])
     bool generate_config = false;
     const char *generate_config_path = NULL;
 
+    // Line-buffer stdout: under systemd it's not a terminal and would otherwise
+    // be block-buffered, delaying warnings in the journal indefinitely
+    setvbuf(stdout, NULL, _IOLBF, 0);
+
     // First pass: check for config path and generate-config flag
     for (int i = 1; i < argc; ++i) {
         if (strncmp(argv[i], "--config=", 9) == 0) {
@@ -810,6 +922,8 @@ int main(int argc, char *argv[])
             include_nvme = false;
         } else if (strcmp(argv[i], "--no_hdd") == 0) {
             include_hdd = false;
+        } else if (strncmp(argv[i], "--temp_source=", 14) == 0) {
+            parse_temp_source(argv[i] + 14, temp_source);
         } else if (strncmp(argv[i], "--debug=", 8) == 0) {
             debug = atoi(argv[i] + 8);
         } else if (strncmp(argv[i], "--interval=", 11) == 0) {
@@ -967,11 +1081,17 @@ int main(int argc, char *argv[])
     // Setup graphite socket (reconnected on failure inside the loop)
     int graphite_sockfd = -1;
 
-    printf("Fan control started. Monitoring %d drives...\n", count);
+    // hwmon source: drives whose sensor is currently unreadable, so the
+    // warning is logged once per outage instead of on every poll
+    std::vector<bool> sensor_missing(count, false);
+
+    printf("Fan control started. Monitoring %d drives (temperature source: %s)...\n",
+           count, temp_source == TEMP_SOURCE_HWMON ? "hwmon" : "smart");
 
     while (true)
     {
         maxtemp = 0;
+        bool any_sensor_missing = false;
 
         // Print separator in monitor/debug mode
         if (debug || monitor_only) {
@@ -989,7 +1109,21 @@ int main(int argc, char *argv[])
             int temp = 0;
             bool is_nvme_drive = is_nvme(drives[i]);
 
-            if (is_nvme_drive) {
+            if (temp_source == TEMP_SOURCE_HWMON) {
+                temp = get_hwmon_drive_temperature(drives[i]);
+                if (temp < 0) {
+                    any_sensor_missing = true;
+                    if (!sensor_missing[i]) {
+                        printf("Warning: no readable hwmon temperature sensor for /dev/%s%s, running fans at full speed\n",
+                               drives[i].c_str(),
+                               is_nvme_drive ? "" : " (is the drivetemp module loaded? modprobe drivetemp)");
+                        sensor_missing[i] = true;
+                    }
+                } else if (sensor_missing[i]) {
+                    printf("hwmon temperature sensor for /dev/%s is back: %d°C\n", drives[i].c_str(), temp);
+                    sensor_missing[i] = false;
+                }
+            } else if (is_nvme_drive) {
                 temp = get_nvme_temperature(drives[i].c_str());
             } else {
                 temp = get_sata_temperature(drives[i].c_str());
@@ -997,13 +1131,18 @@ int main(int argc, char *argv[])
 
             if (temp > maxtemp) maxtemp = temp;
 
-            if (debug || monitor_only) printf("Drive: /dev/%s (%s) temperature: %d°C\n",
-                            drives[i].c_str(),
-                            is_nvme_drive ? "NVMe" : "SATA",
-                            temp);
+            if (debug || monitor_only) {
+                if (temp < 0) {
+                    printf("Drive: /dev/%s (%s) temperature: unavailable\n",
+                           drives[i].c_str(), is_nvme_drive ? "NVMe" : "SATA");
+                } else {
+                    printf("Drive: /dev/%s (%s) temperature: %d°C\n",
+                           drives[i].c_str(), is_nvme_drive ? "NVMe" : "SATA", temp);
+                }
+            }
 
             // Send disk temperature to Graphite
-            if (graphite_sockfd >= 0) {
+            if (graphite_sockfd >= 0 && temp >= 0) {
                 char message[256];
                 snprintf(message, sizeof(message), "fancontrol.%s %d %ld\n", drives[i].c_str(), temp, time(NULL));
                 send_to_graphite(graphite_sockfd, message);
@@ -1065,9 +1204,13 @@ int main(int argc, char *argv[])
         // Calculate fan speed based on temperature
         pwm = calculate_fan_speed(maxtemp);
 
+        // A drive we can't read might be the hot one - don't guess, cool at full speed
+        if (any_sensor_missing) pwm = 255;
+
         if (debug || monitor_only) {
-            printf("Fan speed: temp=%d°C -> pwm=%d (%.0f%%)\n",
-                   maxtemp, pwm, (pwm / 255.0) * 100);
+            printf("Fan speed: temp=%d°C -> pwm=%d (%.0f%%)%s\n",
+                   maxtemp, pwm, (pwm / 255.0) * 100,
+                   any_sensor_missing ? " [sensor missing, full speed]" : "");
         }
 
         // Write new PWM (skip in monitor-only mode)

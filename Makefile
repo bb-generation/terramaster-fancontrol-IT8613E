@@ -16,7 +16,8 @@ tests: tests.cpp fancontrol.cpp
 test: tests
 	./tests
 
-# Installs binary, config, and systemd service. Needs root: sudo make install
+# Installs the systemd service for the binary and config in this directory.
+# Needs root: sudo make install
 install: fancontrol
 	./install_service.sh
 

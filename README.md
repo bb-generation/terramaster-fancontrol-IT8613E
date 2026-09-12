@@ -11,19 +11,33 @@ Initially I made the changes described in [this post](https://xpenology.com/foru
 
 1. **Configuration file support** - All settings can be configured via `/etc/fancontrol.conf`
 2. **Auto-detection of drives** - Automatically detects HDDs, SSDs, and NVMe drives
-3. **NVMe support** - Full support for NVMe drive temperature monitoring (hwmon preferred, nvme-cli fallback)
-4. **Standby-aware** - Doesn't wake sleeping SATA drives for temperature checks
-5. **Simple fan curve** - Linear fan speed control between two temperature thresholds
-6. **Monitor mode** - `--monitor-only` prints temperatures and the computed fan speed without touching the hardware
-7. **Graphite integration** - Optional reporting to a Graphite server for monitoring in Grafana (auto-reconnects)
-8. **Validated configuration** - Bad config values are rejected or warned about instead of crashing the daemon
+3. **Silent temperature readings, no dependencies** - By default all drive temperatures come from the kernel's hwmon sensors (`drivetemp` for SATA/SAS, `nvme` for NVMe): no `smartmontools`, `lm-sensors` or `nvme-cli`, and no HDD click on every poll. See [Drive Temperature Source](#drive-temperature-source)
+4. **NVMe support** - Full support for NVMe drive temperature monitoring
+5. **Standby-aware** - With `temp_source = smart`, sleeping SATA drives aren't woken for temperature checks
+6. **Simple fan curve** - Linear fan speed control between two temperature thresholds
+7. **Monitor mode** - `--monitor-only` prints temperatures and the computed fan speed without touching the hardware
+8. **Graphite integration** - Optional reporting to a Graphite server for monitoring in Grafana (auto-reconnects)
+9. **Validated configuration** - Bad config values are rejected or warned about instead of crashing the daemon
 
 ## Installation:
 Warning: As from Truenas 24.10.1, [the home folder is no longer executable](https://forums.truenas.com/t/shell-script-permission-denied-with-24-10-1/27941). Instead, use the data pool for your scripts.
 
 ### Prerequisites
 
-Install required tools:
+With the default `temp_source = hwmon` there is nothing to install — no `smartmontools`, `lm-sensors` or `nvme-cli`. Temperatures come straight from the kernel. The only requirement is the `drivetemp` module for SATA/SAS drives (NVMe sensors come with the regular `nvme` driver):
+
+```bash
+lsmod | grep drivetemp || sudo modprobe drivetemp
+```
+
+TrueNAS SCALE already loads it for its own disk temperature reporting. On other distributions, load it on every boot:
+
+```bash
+echo drivetemp | sudo tee /etc/modules-load.d/drivetemp.conf
+```
+
+Only if you switch to [`temp_source = smart`](#drive-temperature-source) do you need the userspace tools:
+
 ```bash
 # For SATA/SAS drive temperature monitoring
 apt install smartmontools lm-sensors
@@ -34,10 +48,11 @@ apt install nvme-cli
 
 ### Install from Release (no toolchain needed)
 
-Each [release](https://github.com/schudt/terramaster-fancontrol-IT8613E/releases) ships `fancontrol-linux-x86_64.tar.gz` containing the static binary, sample config, systemd unit, and installer. On the NAS:
+Each [release](https://github.com/bb-generation/terramaster-fancontrol-IT8613E/releases) ships `fancontrol-linux-x86_64.tar.gz` containing the static binary, sample config, systemd unit, and installer. Extract it into a directory on a pool — the service runs the binary straight from there, and TrueNAS wipes anything outside a pool on update:
 
 ```bash
-curl -sL https://github.com/schudt/terramaster-fancontrol-IT8613E/releases/latest/download/fancontrol-linux-x86_64.tar.gz | tar xz
+mkdir -p /mnt/yourpool/fancontrol && cd /mnt/yourpool/fancontrol
+curl -sL https://github.com/bb-generation/terramaster-fancontrol-IT8613E/releases/latest/download/fancontrol-linux-x86_64.tar.gz | tar xz
 sudo ./install_service.sh
 ```
 
@@ -47,7 +62,7 @@ The binary is fully static — runs on any x86_64 Linux, no library requirements
 
 1. Clone the repo
    ```
-   git clone https://github.com/schudt/terramaster-fancontrol-IT8613E
+   git clone https://github.com/bb-generation/terramaster-fancontrol-IT8613E
    ```
 
 2. Build.
@@ -58,9 +73,9 @@ The binary is fully static — runs on any x86_64 Linux, no library requirements
    - Or with the GCC Docker image (no local toolchain needed):
      ```
      docker pull gcc
-     sudo docker run --rm -v "$PWD":/usr/src/myapp -w /usr/src/myapp gcc g++ -O2 -Wall -o fancontrol fancontrol.cpp
+     sudo docker run --rm -v "$PWD":/usr/src/myapp -w /usr/src/myapp gcc g++ -O2 -Wall -static -s -o fancontrol fancontrol.cpp
      ```
-     Note: use `g++` (not `gcc`) — the source is C++ and needs libstdc++ linked.
+     Note: use `g++` (not `gcc`) — the source is C++ and needs libstdc++ linked. Keep `-static`: the `gcc` image ships a much newer glibc than TrueNAS SCALE or Debian stable, so a dynamically linked binary fails there with `GLIBC_2.38 not found` / `GLIBCXX_3.4.31 not found`.
 
 3. Optional: run the unit tests (works on Linux and macOS, no root needed):
    ```
@@ -108,33 +123,19 @@ sudo ./fancontrol --drive_list="sda,sdb,sdc,sdd,nvme0n1" --debug=1
 
 ### Systemd Service Installation
 
-Easiest: build + install + start in one go (wraps `install_service.sh`):
+Build + install + start in one go (wraps `install_service.sh`):
 ```bash
 sudo make install
 ```
 
-Or manually:
+The service runs the binary and `fancontrol.conf` straight out of this directory, so keep it on a pool. Nothing is copied to `/usr` or `/etc`: TrueNAS SCALE mounts the root filesystem read-only, and files put there wouldn't survive an update anyway. The only thing installed outside this directory is the unit at `/etc/systemd/system/fancontrol.service`, generated with `ExecStart` pointing back here.
 
-1. Copy the binary and config:
-   ```bash
-   sudo cp fancontrol /usr/local/bin/
-   sudo cp fancontrol.conf /etc/
-   ```
+That also means you edit `fancontrol.conf` in place and just restart the service:
+```bash
+sudo systemctl restart fancontrol.service
+```
 
-2. Copy and enable the service:
-   ```bash
-   sudo cp fancontrol.service /etc/systemd/system/
-   sudo systemctl daemon-reload
-   sudo systemctl start fancontrol.service
-   sudo systemctl enable fancontrol.service
-   ```
-
-3. Check status:
-   ```bash
-   sudo systemctl status fancontrol.service
-   ```
-
-Note: You may need to reinstall the service after Truenas updates. Use `install_service.sh` for convenience.
+Note: a TrueNAS update drops the systemd entry, so re-run `sudo ./install_service.sh` afterwards. Binary and config stay put on the pool.
 
 ## Parameters:
 ```
@@ -151,6 +152,9 @@ Drive Options:
   --auto_detect         Auto-detect drives (default)
   --no_nvme             Exclude NVMe drives from auto-detection
   --no_hdd              Exclude HDD/SSD drives from auto-detection
+  --temp_source=<hwmon|smart>  Where drive temperatures come from (default: hwmon)
+                        hwmon: kernel sensors only (drivetemp, nvme), no tools
+                        smart: smartctl (SATA/SAS), hwmon or nvme-cli (NVMe)
 
 Fan Curve:
   --temp_low=<value>    Temperature for minimum fan speed (default: 40°C)
@@ -213,7 +217,9 @@ interval = 10
 auto_detect = true
 include_nvme = true
 include_hdd = true
-# Don't wake sleeping SATA drives for temperature checks
+# Where drive temperatures come from: hwmon (default) or smart
+temp_source = hwmon
+# Don't wake sleeping SATA drives for temperature checks (smart only)
 respect_standby = true
 # drive_list = sda,sdb,sdc,sdd,nvme0n1
 
@@ -242,6 +248,44 @@ The program automatically detects drives by scanning `/sys/block/`. It identifie
 - **SSDs** - Non-rotational SATA drives
 - **NVMe** - NVMe drives (detected by device name starting with `nvme`)
 
-Temperature is read using:
-- `smartctl` for SATA/SAS drives
-- `nvme smart-log` or hwmon for NVMe drives
+How the temperature of each drive is read depends on `temp_source`, see below.
+
+## Drive Temperature Source
+
+`temp_source` in the `[drives]` section (or `--temp_source=` on the command line) selects how drive temperatures are read:
+
+| | `hwmon` (default) | `smart` |
+|---|---|---|
+| SATA/SAS | kernel `drivetemp` sensor | `smartctl -A` |
+| NVMe | kernel `nvme` sensor | hwmon, falling back to `nvme smart-log` |
+| External tools | none | `smartmontools`, `nvme-cli`, `lm-sensors` |
+| HDD noise per poll | silent | may click (see below) |
+| Sensor unreadable | fans go to full speed | drive counts as 0°C |
+| Sleeping drives | never spun up, but the spin-down timer may be reset on some drives | left alone (`respect_standby`) |
+
+### Why `hwmon` is the default
+
+`smartctl -A` reads the SMART attribute table, which many HDDs keep in a reserved area on the platters. Every poll moves the heads there and back, so with a 10 s interval you hear a short click from every drive. It's noise, not wear (no extra load/unload cycles), but in a living room it's noticeable.
+
+The kernel's `drivetemp` driver asks the drive through SCT Command Transport instead, which is answered by the drive electronics without moving the heads. (Only drives without SCT support fall back to reading SMART attributes.) NVMe drives expose their sensor through the regular `nvme` driver. Both show up under `/sys/class/hwmon/`, which is also where TrueNAS SCALE gets the disk temperatures for its reporting.
+
+On top of being quiet, this needs no external tools at all: the daemon reads sysfs and spawns no processes.
+
+### When to use `smart` instead
+
+Set this in `/etc/fancontrol.conf` if `drivetemp` isn't available on your system, or if your drives are meant to spin down and stay asleep:
+
+```ini
+[drives]
+temp_source = smart
+```
+
+Check which source is active either way — the startup line says so:
+
+```bash
+sudo fancontrol --monitor-only
+```
+
+### Upgrading from a version without `temp_source`
+
+An existing `/etc/fancontrol.conf` has no `temp_source` line, so it now uses `hwmon`. If `drivetemp` isn't loaded on your system, the fans will run at full speed and the log will say so on the first poll. Either load the module (see [Prerequisites](#prerequisites)) or add `temp_source = smart` to keep the previous behaviour.
