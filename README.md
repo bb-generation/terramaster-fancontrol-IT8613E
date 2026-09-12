@@ -271,13 +271,6 @@ The kernel's `drivetemp` driver asks the drive through SCT Command Transport ins
 
 On top of being quiet, this needs no external tools at all: the daemon reads sysfs and spawns no processes.
 
-### How it behaves
-
-- Each drive is matched to its sensor through the device it belongs to, on every poll. hwmon numbers (`hwmon5`, `hwmon6`, …) follow driver load order, not drive names, and can change after a reboot or update, so they're never used for the mapping.
-- If a drive's sensor can't be found or read (for example because `drivetemp` isn't loaded), fancontrol logs a warning and runs the fans at **full speed** until the sensor is back. There is no silent fallback to `smartctl`.
-- `respect_standby` has no effect: the kernel driver is queried on every poll. Per the [drivetemp documentation](https://www.kernel.org/doc/html/latest/hwmon/drivetemp.html), reading the temperature resets the spin-down timer on some drives (observed on WD120EFAX; `hddtemp` and `smartd` cause the same thing), so a drive polled every 10 s may never reach standby. It does not spin up a drive that is already sleeping — on the drive this was investigated on, the temperature stays readable in standby without changing the power mode. If your drives are meant to spin down, either poll at more than twice the spin-down timeout, or use `temp_source = smart`, which passes `-n standby` to smartctl.
-- Because the reads are cheap and silent, a short `interval` (the default 10 s) is fine.
-
 ### When to use `smart` instead
 
 Set this in `/etc/fancontrol.conf` if `drivetemp` isn't available on your system, or if your drives are meant to spin down and stay asleep:
