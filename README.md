@@ -48,9 +48,10 @@ apt install nvme-cli
 
 ### Install from Release (no toolchain needed)
 
-Each [release](https://github.com/schudt/terramaster-fancontrol-IT8613E/releases) ships `fancontrol-linux-x86_64.tar.gz` containing the static binary, sample config, systemd unit, and installer. On the NAS:
+Each [release](https://github.com/schudt/terramaster-fancontrol-IT8613E/releases) ships `fancontrol-linux-x86_64.tar.gz` containing the static binary, sample config, systemd unit, and installer. Extract it into a directory on a pool — the service runs the binary straight from there, and TrueNAS wipes anything outside a pool on update:
 
 ```bash
+mkdir -p /mnt/yourpool/fancontrol && cd /mnt/yourpool/fancontrol
 curl -sL https://github.com/schudt/terramaster-fancontrol-IT8613E/releases/latest/download/fancontrol-linux-x86_64.tar.gz | tar xz
 sudo ./install_service.sh
 ```
@@ -122,39 +123,19 @@ sudo ./fancontrol --drive_list="sda,sdb,sdc,sdd,nvme0n1" --debug=1
 
 ### Systemd Service Installation
 
-Easiest: build + install + start in one go (wraps `install_service.sh`):
+Build + install + start in one go (wraps `install_service.sh`):
 ```bash
 sudo make install
 ```
 
-On a system with a read-only root filesystem — TrueNAS SCALE, for example, where `/usr/local/bin` can't be written — keep this directory on a pool and install in place. The binary and the config stay where they are, and only the systemd unit is written to `/etc/systemd/system`:
+The service runs the binary and `fancontrol.conf` straight out of this directory, so keep it on a pool. Nothing is copied to `/usr` or `/etc`: TrueNAS SCALE mounts the root filesystem read-only, and files put there wouldn't survive an update anyway. The only thing installed outside this directory is the unit at `/etc/systemd/system/fancontrol.service`, generated with `ExecStart` pointing back here.
+
+That also means you edit `fancontrol.conf` in place and just restart the service:
 ```bash
-sudo make install-in-place    # or: sudo ./install_service.sh --in-place
+sudo systemctl restart fancontrol.service
 ```
-The generated unit points `ExecStart` at those paths, and when they live under `/mnt` it also waits for `zfs-mount.service`, so the pool is mounted before fancontrol starts.
 
-Or manually:
-
-1. Copy the binary and config:
-   ```bash
-   sudo cp fancontrol /usr/local/bin/
-   sudo cp fancontrol.conf /etc/
-   ```
-
-2. Copy and enable the service:
-   ```bash
-   sudo cp fancontrol.service /etc/systemd/system/
-   sudo systemctl daemon-reload
-   sudo systemctl start fancontrol.service
-   sudo systemctl enable fancontrol.service
-   ```
-
-3. Check status:
-   ```bash
-   sudo systemctl status fancontrol.service
-   ```
-
-Note: You may need to reinstall the service after Truenas updates. Use `install_service.sh` for convenience.
+Note: a TrueNAS update drops the systemd entry, so re-run `sudo ./install_service.sh` afterwards. Binary and config stay put on the pool.
 
 ## Parameters:
 ```
