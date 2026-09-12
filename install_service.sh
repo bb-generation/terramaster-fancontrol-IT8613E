@@ -24,7 +24,7 @@ if [[ ! -f "$BINARY_SOURCE" ]]; then
     echo "Please compile the program first:"
     echo "  make"
     echo "or via Docker:"
-    echo "  docker run --rm -v \"\$PWD\":/usr/src/myapp -w /usr/src/myapp gcc g++ -O2 -Wall -o fancontrol fancontrol.cpp"
+    echo "  docker run --rm -v \"\$PWD\":/usr/src/myapp -w /usr/src/myapp gcc g++ -O2 -Wall -static -s -o fancontrol fancontrol.cpp"
     exit 1
 fi
 

@@ -62,9 +62,9 @@ The binary is fully static — runs on any x86_64 Linux, no library requirements
    - Or with the GCC Docker image (no local toolchain needed):
      ```
      docker pull gcc
-     sudo docker run --rm -v "$PWD":/usr/src/myapp -w /usr/src/myapp gcc g++ -O2 -Wall -o fancontrol fancontrol.cpp
+     sudo docker run --rm -v "$PWD":/usr/src/myapp -w /usr/src/myapp gcc g++ -O2 -Wall -static -s -o fancontrol fancontrol.cpp
      ```
-     Note: use `g++` (not `gcc`) — the source is C++ and needs libstdc++ linked.
+     Note: use `g++` (not `gcc`) — the source is C++ and needs libstdc++ linked. Keep `-static`: the `gcc` image ships a much newer glibc than TrueNAS SCALE or Debian stable, so a dynamically linked binary fails there with `GLIBC_2.38 not found` / `GLIBCXX_3.4.31 not found`.
 
 3. Optional: run the unit tests (works on Linux and macOS, no root needed):
    ```
