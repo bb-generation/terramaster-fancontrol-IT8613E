@@ -274,7 +274,7 @@ How the temperature of each drive is read depends on `temp_source`, see below.
 | External tools | none | `smartmontools`, `nvme-cli`, `lm-sensors` |
 | HDD noise per poll | silent | may click (see below) |
 | Sensor unreadable | fans go to full speed | drive counts as 0°C |
-| Sleeping drives | may be kept awake | left alone (`respect_standby`) |
+| Sleeping drives | never spun up, but the spin-down timer may be reset on some drives | left alone (`respect_standby`) |
 
 ### Why `hwmon` is the default
 
@@ -288,7 +288,7 @@ On top of being quiet, this needs no external tools at all: the daemon reads sys
 
 - Each drive is matched to its sensor through the device it belongs to, on every poll. hwmon numbers (`hwmon5`, `hwmon6`, …) follow driver load order, not drive names, and can change after a reboot or update, so they're never used for the mapping.
 - If a drive's sensor can't be found or read (for example because `drivetemp` isn't loaded), fancontrol logs a warning and runs the fans at **full speed** until the sensor is back. There is no silent fallback to `smartctl`.
-- `respect_standby` has no effect: the kernel driver is queried on every poll. According to the `drivetemp` documentation, reading the temperature can reset the spin-down timer on some drives, so drives configured to spin down may stay awake.
+- `respect_standby` has no effect: the kernel driver is queried on every poll. Per the [drivetemp documentation](https://www.kernel.org/doc/html/latest/hwmon/drivetemp.html), reading the temperature resets the spin-down timer on some drives (observed on WD120EFAX; `hddtemp` and `smartd` cause the same thing), so a drive polled every 10 s may never reach standby. It does not spin up a drive that is already sleeping — on the drive this was investigated on, the temperature stays readable in standby without changing the power mode. If your drives are meant to spin down, either poll at more than twice the spin-down timeout, or use `temp_source = smart`, which passes `-n standby` to smartctl.
 - Because the reads are cheap and silent, a short `interval` (the default 10 s) is fine.
 
 ### When to use `smart` instead
