@@ -30,6 +30,7 @@
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
+#include <signal.h>
 #include <arpa/inet.h>
 #include <dirent.h>
 #include <fstream>
@@ -50,6 +51,10 @@ static inline int iopl(int) { return -1; }
 #ifndef MSG_NOSIGNAL
 #define MSG_NOSIGNAL 0
 #endif
+
+// Set by SIGTERM/SIGINT/SIGHUP; the main loop exits and leaves the fans safe
+static volatile sig_atomic_t stop_requested = 0;
+static void on_stop_signal(int) { stop_requested = 1; }
 
 // Default config file location
 static const char *DEFAULT_CONFIG_PATH = "/etc/fancontrol.conf";
@@ -695,69 +700,69 @@ int get_nvme_temperature(const char *device)
     return temp < 0 ? 0 : temp;
 }
 
-// Get CPU temperature directly from sysfs (avoids spawning sensors process)
-// Returns temperature in Celsius, or 0 if not available
-int get_cpu_temperature_sysfs()
+// Read an integer millidegree value from a sysfs file. Returns °C or -1.
+static int read_millidegrees(const std::string &path)
 {
-    // Try common thermal zone paths
-    const char *thermal_paths[] = {
-        "/sys/class/thermal/thermal_zone0/temp",  // Most common
-        "/sys/class/thermal/thermal_zone1/temp",
-        "/sys/devices/platform/coretemp.0/hwmon/hwmon*/temp1_input",
-        NULL
-    };
-    
-    // First, try thermal_zone paths directly
-    for (int i = 0; thermal_paths[i] != NULL; i++) {
-        FILE *f = fopen(thermal_paths[i], "r");
-        if (f) {
-            int millidegrees;
-            if (fscanf(f, "%d", &millidegrees) == 1) {
-                fclose(f);
-                return millidegrees / 1000;
-            }
-            fclose(f);
-        }
-    }
-    
-    // Try to find coretemp hwmon
-    DIR *hwmon_dir = opendir("/sys/class/hwmon");
-    if (hwmon_dir) {
+    std::ifstream f(path);
+    int millidegrees;
+    if (f >> millidegrees) return millidegrees / 1000;
+    return -1;
+}
+
+// Get CPU temperature directly from sysfs (avoids spawning sensors process)
+// Returns temperature in Celsius, or 0 if not available.
+//
+// Order matters: thermal_zone0 is often the ACPI zone (acpitz), which on many
+// boards (e.g. TerraMaster F4-424) reports a constant ~27 °C that has nothing
+// to do with the CPU. So prefer the real package sensor:
+//   1. hwmon coretemp (Intel) / k10temp (AMD), temp1 = package
+//   2. thermal zone of type x86_pkg_temp
+//   3. any thermal zone that is not acpitz
+int get_cpu_temperature_sysfs(const std::string &sysfs = "/sys")
+{
+    // 1. coretemp / k10temp hwmon
+    std::string hwmon_class = sysfs + "/class/hwmon";
+    if (DIR *dir = opendir(hwmon_class.c_str())) {
         struct dirent *entry;
-        while ((entry = readdir(hwmon_dir)) != nullptr) {
-            if (strncmp(entry->d_name, "hwmon", 5) == 0) {
-                char name_path[320];
-                snprintf(name_path, sizeof(name_path), "/sys/class/hwmon/%s/name", entry->d_name);
-                FILE *nf = fopen(name_path, "r");
-                if (nf) {
-                    char name[64];
-                    if (fgets(name, sizeof(name), nf)) {
-                        // Look for coretemp or k10temp (AMD)
-                        if (strstr(name, "coretemp") || strstr(name, "k10temp")) {
-                            fclose(nf);
-                            // Read temp1_input (Package temp)
-                            char temp_path[320];
-                            snprintf(temp_path, sizeof(temp_path), "/sys/class/hwmon/%s/temp1_input", entry->d_name);
-                            FILE *tf = fopen(temp_path, "r");
-                            if (tf) {
-                                int millidegrees;
-                                if (fscanf(tf, "%d", &millidegrees) == 1) {
-                                    fclose(tf);
-                                    closedir(hwmon_dir);
-                                    return millidegrees / 1000;
-                                }
-                                fclose(tf);
-                            }
-                        }
-                    }
-                    fclose(nf);
-                }
-            }
+        int temp = -1;
+        while (temp < 0 && (entry = readdir(dir)) != nullptr) {
+            if (strncmp(entry->d_name, "hwmon", 5) != 0) continue;
+            std::string base = hwmon_class + "/" + entry->d_name;
+            std::ifstream name_file(base + "/name");
+            std::string name;
+            if (!std::getline(name_file, name)) continue;
+            name = trim(name);
+            if (name != "coretemp" && name != "k10temp") continue;
+            temp = read_millidegrees(base + "/temp1_input");
         }
-        closedir(hwmon_dir);
+        closedir(dir);
+        if (temp > 0) return temp;
     }
-    
-    return 0; // Not found
+
+    // 2./3. thermal zones: x86_pkg_temp first, then anything but acpitz
+    std::string thermal_class = sysfs + "/class/thermal";
+    int fallback = -1;
+    if (DIR *dir = opendir(thermal_class.c_str())) {
+        struct dirent *entry;
+        int pkg = -1;
+        while ((entry = readdir(dir)) != nullptr) {
+            if (strncmp(entry->d_name, "thermal_zone", 12) != 0) continue;
+            std::string base = thermal_class + "/" + entry->d_name;
+            std::ifstream type_file(base + "/type");
+            std::string type;
+            if (!std::getline(type_file, type)) continue;
+            type = trim(type);
+            if (type == "acpitz") continue;
+            int t = read_millidegrees(base + "/temp");
+            if (t <= 0) continue;
+            if (type == "x86_pkg_temp") { pkg = t; break; }
+            if (fallback < 0) fallback = t;
+        }
+        closedir(dir);
+        if (pkg > 0) return pkg;
+    }
+
+    return fallback > 0 ? fallback : 0; // 0 = not found
 }
 
 // Get temperature for SATA/SAS drive
@@ -1085,10 +1090,20 @@ int main(int argc, char *argv[])
     // warning is logged once per outage instead of on every poll
     std::vector<bool> sensor_missing(count, false);
 
+    // Catch stop signals so we never leave the fans at a low PWM when exiting.
+    // No SA_RESTART: sleep() returns early and the loop ends promptly.
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = on_stop_signal;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGTERM, &sa, nullptr);
+    sigaction(SIGINT, &sa, nullptr);
+    sigaction(SIGHUP, &sa, nullptr);
+
     printf("Fan control started. Monitoring %d drives (temperature source: %s)...\n",
            count, temp_source == TEMP_SOURCE_HWMON ? "hwmon" : "smart");
 
-    while (true)
+    while (!stop_requested)
     {
         maxtemp = 0;
         bool any_sensor_missing = false;
@@ -1232,8 +1247,20 @@ int main(int argc, char *argv[])
             send_to_graphite(graphite_sockfd, message);
         }
 
-        // Sleep at end of loop
+        // Sleep at end of loop (interrupted early by a stop signal)
         sleep(interval);
     }
+
+    // Leaving: nothing controls the fans after us, so run them at full speed
+    // rather than freezing whatever (possibly low) PWM was last written.
+    if (!monitor_only) {
+        ecwrite(0x6b, 255);
+        ecwrite(0x73, 255);
+        printf("Stop requested: fans set to full speed, exiting.\n");
+    } else {
+        printf("Stop requested, exiting.\n");
+    }
+    if (graphite_sockfd >= 0) close(graphite_sockfd);
+    return 0;
 }
 #endif // FANCONTROL_NO_MAIN

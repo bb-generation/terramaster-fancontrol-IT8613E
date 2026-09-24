@@ -306,6 +306,45 @@ static void test_get_hwmon_drive_temperature()
     CHECK(system(("rm -rf '" + root + "'").c_str()) == 0);
 }
 
+static void make_zone(const std::string &root, const char *zone, const char *type, const char *millideg)
+{
+    std::string dir = root + "/class/thermal/" + zone;
+    make_dirs(dir);
+    write_file(dir + "/type", std::string(type) + "\n");
+    write_file(dir + "/temp", millideg);
+}
+
+static void test_get_cpu_temperature_sysfs()
+{
+    char tmpl[] = "/tmp/fancontrol-cpu-XXXXXX";
+    CHECK(mkdtemp(tmpl) != NULL);
+    std::string root = tmpl;
+
+    // TerraMaster F4-424 layout: zone0 = acpitz stuck at 27 °C
+    make_zone(root, "thermal_zone0", "acpitz", "27800");
+    make_zone(root, "thermal_zone1", "x86_pkg_temp", "42000");
+    CHECK(get_cpu_temperature_sysfs(root) == 42);          // not the acpitz 27
+
+    // coretemp hwmon wins over thermal zones
+    std::string hw = root + "/class/hwmon/hwmon4";
+    make_dirs(hw);
+    write_file(hw + "/name", "coretemp\n");
+    write_file(hw + "/temp1_input", "38000");
+    CHECK(get_cpu_temperature_sysfs(root) == 38);
+
+    // only acpitz available -> treated as unavailable
+    char tmpl2[] = "/tmp/fancontrol-cpu-XXXXXX";
+    CHECK(mkdtemp(tmpl2) != NULL);
+    std::string root2 = tmpl2;
+    make_zone(root2, "thermal_zone0", "acpitz", "27800");
+    CHECK(get_cpu_temperature_sysfs(root2) == 0);
+
+    // nothing at all
+    CHECK(get_cpu_temperature_sysfs(root2 + "/nope") == 0);
+
+    CHECK(system(("rm -rf '" + root + "' '" + root2 + "'").c_str()) == 0);
+}
+
 int main()
 {
     // Compiled-in default, checked before any test mutates the globals
@@ -323,6 +362,7 @@ int main()
     test_is_nvme();
     test_nvme_controller_name();
     test_get_hwmon_drive_temperature();
+    test_get_cpu_temperature_sysfs();
 
     if (failures == 0) {
         printf("All tests passed.\n");
