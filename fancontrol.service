@@ -7,7 +7,8 @@ After=local-fs.target zfs-mount.service
 Type=simple
 # install_service.sh rewrites this to the binary and config next to it
 ExecStart=/usr/local/bin/fancontrol --config=/etc/fancontrol.conf
-Restart=on-failure
+# always: a crash or unexpected exit restarts it; only "systemctl stop" keeps it off
+Restart=always
 RestartSec=10
 
 # Hardening (root is still required for raw IO port access via iopl)

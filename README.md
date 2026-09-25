@@ -137,6 +137,8 @@ sudo systemctl restart fancontrol.service
 
 Note: a TrueNAS update drops the systemd entry, so re-run `sudo ./install_service.sh` afterwards. Binary and config stay put on the pool.
 
+Stopping the service (`systemctl stop`, a shutdown, or Ctrl-C in a foreground run) sets the fans to 100% before the daemon exits. Nothing controls the fans once it's gone, so they never stay stuck at a low speed. The unit uses `Restart=always`, so only an explicit stop keeps it off. `--monitor-only` never writes to the fans, not even on exit.
+
 ## Parameters:
 ```
 Usage:
@@ -249,6 +251,17 @@ The program automatically detects drives by scanning `/sys/block/`. It identifie
 - **NVMe** - NVMe drives (detected by device name starting with `nvme`)
 
 How the temperature of each drive is read depends on `temp_source`, see below.
+
+## CPU Temperature
+
+The CPU package temperature also feeds the fan curve (minus `cpu_temp_offset`, averaged over `cpu_avg_samples`). It is read from sysfs in this order:
+
+1. hwmon `coretemp` (Intel) or `k10temp` (AMD), `temp1_input` (package)
+2. thermal zone of type `x86_pkg_temp`
+3. any other thermal zone, except `acpitz`
+4. `sensors` (lm-sensors) as a last resort
+
+`acpitz` is always ignored: on boards like the F4-424 it is `thermal_zone0` and reports a constant ~27°C that has nothing to do with the CPU.
 
 ## Drive Temperature Source
 
