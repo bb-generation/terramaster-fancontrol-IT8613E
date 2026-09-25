@@ -52,13 +52,6 @@ static inline int iopl(int) { return -1; }
 #define MSG_NOSIGNAL 0
 #endif
 
-// Set by SIGTERM/SIGINT/SIGHUP; the main loop exits and leaves the fans safe
-static volatile sig_atomic_t stop_requested = 0;
-static void on_stop_signal(int) { stop_requested = 1; }
-
-// Default config file location
-static const char *DEFAULT_CONFIG_PATH = "/etc/fancontrol.conf";
-
 // These defaults can be overridden via config file or CLI
 static bool debug = false; // Turn on/off logging
 static int interval = 10;  // How often we poll for temperatures
@@ -82,7 +75,6 @@ static bool include_nvme = true; // Include NVMe drives in auto-detection
 static bool include_hdd = true;  // Include HDD/SSD drives in auto-detection
 static int cpu_temp_offset = 20; // CPU temperature offset compared to drives
 static bool respect_standby = true; // Don't wake sleeping drives for temperature check
-static bool monitor_only = false; // Monitor mode: only output temps, don't control fans
 
 // Where drive temperatures come from
 enum TempSource {
@@ -877,6 +869,16 @@ bool validate_settings()
 }
 
 #ifndef FANCONTROL_NO_MAIN
+// Only used by main(); kept out of the test build to avoid unused warnings
+static bool monitor_only = false; // Monitor mode: only output temps, don't control fans
+
+// Set by SIGTERM/SIGINT/SIGHUP; the main loop exits and leaves the fans safe
+static volatile sig_atomic_t stop_requested = 0;
+static void on_stop_signal(int) { stop_requested = 1; }
+
+// Default config file location
+static const char *DEFAULT_CONFIG_PATH = "/etc/fancontrol.conf";
+
 int main(int argc, char *argv[])
 {
     const char *config_path = DEFAULT_CONFIG_PATH;
